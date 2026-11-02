@@ -95,23 +95,25 @@ if torch.cuda.is_available():
     gpu = torch.cuda.get_device_name(0)
     vram = torch.cuda.get_device_properties(0).total_memory / 1024**3
     print(f"GPU: {gpu} ({vram:.1f} GB VRAM)")
-    if vram >= 12:
-        cfg = {"d_model": 320, "enc_layers": 5, "dec_layers": 5, "nhead": 10, "ff": 1280, "batch": 56, "steps": 45000}
+    if vram >= 16:
+        cfg = {"d_model": 384, "enc_layers": 6, "dec_layers": 6, "nhead": 12, "ff": 1536, "batch": 96, "steps": 50000}
+    elif vram >= 12:
+        cfg = {"d_model": 320, "enc_layers": 5, "dec_layers": 5, "nhead": 10, "ff": 1280, "batch": 96, "steps": 48000}
     elif vram >= 10:
-        cfg = {"d_model": 288, "enc_layers": 4, "dec_layers": 4, "nhead": 9, "ff": 1152, "batch": 52, "steps": 42000}
+        cfg = {"d_model": 288, "enc_layers": 5, "dec_layers": 5, "nhead": 9, "ff": 1152, "batch": 80, "steps": 45000}
     elif vram >= 8:
-        cfg = {"d_model": 256, "enc_layers": 4, "dec_layers": 4, "nhead": 8, "ff": 1024, "batch": 48, "steps": 40000}
+        cfg = {"d_model": 256, "enc_layers": 4, "dec_layers": 5, "nhead": 8, "ff": 1024, "batch": 72, "steps": 42000}
     elif vram >= 6:
-        cfg = {"d_model": 224, "enc_layers": 4, "dec_layers": 4, "nhead": 7, "ff": 896, "batch": 32, "steps": 40000}
+        cfg = {"d_model": 224, "enc_layers": 4, "dec_layers": 4, "nhead": 7, "ff": 896, "batch": 48, "steps": 40000}
     else:
-        cfg = {"d_model": 192, "enc_layers": 3, "dec_layers": 3, "nhead": 6, "ff": 768, "batch": 24, "steps": 35000}
-    print(f"Config auto: d_model={cfg['d_model']} | {cfg['enc_layers']}+{cfg['dec_layers']} | batch={cfg['batch']} | steps={cfg['steps']}")
+        cfg = {"d_model": 192, "enc_layers": 4, "dec_layers": 4, "nhead": 6, "ff": 768, "batch": 32, "steps": 38000}
+    print(f"Config auto: d_model={cfg['d_model']} | {cfg['enc_layers']}+{cfg['dec_layers']} | batch={cfg['batch']} | steps={cfg['steps']} | ff={cfg['ff']}")
     with open('/tmp/train_config.sh','w') as f:
         for k,v in cfg.items(): f.write(f"{k.upper()}={v}\n")
 else:
-    print("CPU uniquement - configuration légère")
+    print("CPU uniquement - configuration optimisée")
     with open('/tmp/train_config.sh','w') as f:
-        f.write("D_MODEL=160\nENC_LAYERS=3\nDEC_LAYERS=3\nNHEAD=5\nFF=640\nBATCH=16\nSTEPS=25000\n")
+        f.write("D_MODEL=192\nENC_LAYERS=4\nDEC_LAYERS=4\nNHEAD=6\nFF=768\nBATCH=32\nSTEPS=32000\n")
 PYEOF
 source /tmp/train_config.sh
 echo ""
@@ -129,17 +131,19 @@ python regression_symbolique.py \
   --enc-layers ${ENC_LAYERS} \
   --dec-layers ${DEC_LAYERS} \
   --ff ${FF} \
-  --dropout 0.1 \
+  --dropout 0.08 \
   --batch-size ${BATCH} \
-  --max-depth 3 \
+  --max-depth 4 \
   --n-points 64 \
   --canonique \
   --loss-const huber \
-  --lr 2e-4 \
-  --warmup 3000 \
-  --eval-every 2000 \
-  --eval-samples 80 \
-  --examples 8 \
+  --w-const 1.2 \
+  --lr 3e-4 \
+  --warmup 1500 \
+  --eval-every 1000 \
+  --eval-samples 100 \
+  --examples 10 \
+  --num-workers 6 \
   --ckpt modele_regression_nouveau.pt
 
 echo ""
