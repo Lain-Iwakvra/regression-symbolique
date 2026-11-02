@@ -342,7 +342,7 @@ class App:
         ttk.Label(right, textvariable=self.status_var, style="Subtitle.TLabel").pack(anchor="w", pady=(8, 0))
 
         self._change_mode()
-        root.after(100, self._check_queue)
+        self.root.after(100, self._check_queue)
 
     def _change_mode(self):
         self.mode = self.mode_var.get()
