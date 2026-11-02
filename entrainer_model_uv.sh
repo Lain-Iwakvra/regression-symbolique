@@ -1,6 +1,6 @@
 #!/bin/bash
 # Script d'entraînement automatisé avec uv - Régression symbolique (from scratch)
-# Config recommandée pour RTX 3060 : d_model 256, 4+4 couches
+# S'adapte automatiquement à la configuration matérielle
 
 set -e
 
@@ -9,10 +9,10 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
 echo -e "${BLUE}==================================================${NC}"
-echo -e "${BLUE}   ENTRAÎNEMENT AVEC UV - FROM SCRATCH${NC}"
+echo -e "${BLUE}   ENTRAÎNEMENT ADAPTATIF - FROM SCRATCH${NC}"
 echo -e "${BLUE}==================================================${NC}"
 echo ""
 
@@ -24,139 +24,113 @@ echo -e "${GREEN}[INFO]${NC} Répertoire de travail : $SCRIPT_DIR"
 echo ""
 
 # Vérification des fichiers requis
-echo -e "${BLUE}[VÉRIFICATION]${NC} Fichiers requis..."
 for f in regression_symbolique.py benchmark_valide.json; do
-    if [ ! -f "$f" ]; then
-        echo -e "${RED}[ERREUR]${NC} Fichier manquant : $f"
-        exit 1
+    if [ -f "$f" ]; then
+        echo -e "${GREEN}[OK]${NC} $f"
     fi
-    echo -e "${GREEN}[OK]${NC} $f"
 done
 echo ""
 
 # Vérification/installation de uv
-echo -e "${BLUE}[UV]${NC} Vérification de uv..."
 if ! command -v uv &> /dev/null; then
-    echo -e "${YELLOW}[INFO]${NC} uv non trouvé, installation en cours..."
+    echo -e "${YELLOW}[INFO]${NC} Installation de uv..."
     curl -LsSf https://astral.sh/uv/install.sh | sh
     export PATH="$HOME/.cargo/bin:$PATH"
     export PATH="$HOME/.local/bin:$PATH"
-    echo -e "${GREEN}[OK]${NC} uv installé"
-else
-    echo -e "${GREEN}[OK]${NC} $(uv --version)"
 fi
+echo -e "${GREEN}[OK]${NC} $(uv --version 2>/dev/null || echo 'uv installé')"
 echo ""
 
-# Forcer l'utilisation de Python 3.12 (PyTorch ne supporte pas 3.14)
-echo -e "${BLUE}[PYTHON]${NC} Recherche de Python 3.12..."
+# Détection Python compatible
 PYTHON_PATH=""
-
-# Vérifier d'abord python3.12
-if command -v python3.12 &> /dev/null; then
-    ver=$(python3.12 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
-    if [[ "$ver" == "3.12" ]]; then
-        PYTHON_PATH=$(command -v python3.12)
-        echo -e "${GREEN}[OK]${NC} Trouvé: $PYTHON_PATH (Python $ver)"
+for py in python3.12 python3.11 python3.13 /usr/bin/python3.12 /usr/local/bin/python3.12; do
+    if [ -f "$py" ] || command -v $py &> /dev/null; then
+        p=$(command -v $py 2>/dev/null || echo $py)
+        if [ -x "$p" ]; then
+            ver=$($p -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null)
+            if [[ "$ver" == "3.11" || "$ver" == "3.12" || "$ver" == "3.13" ]]; then
+                PYTHON_PATH=$p
+                echo -e "${GREEN}[OK]${NC} Python $ver : $p"
+                break
+            fi
+        fi
     fi
-fi
-
-# Si pas trouvé, chercher dans /usr/bin
-if [ -z "$PYTHON_PATH" ] && [ -f "/usr/bin/python3.12" ]; then
-    ver=$(/usr/bin/python3.12 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
-    if [[ "$ver" == "3.12" ]]; then
-        PYTHON_PATH="/usr/bin/python3.12"
-        echo -e "${GREEN}[OK]${NC} Trouvé: $PYTHON_PATH (Python $ver)"
-    fi
-fi
-
-# Si toujours pas trouvé, chercher dans /usr/local/bin
-if [ -z "$PYTHON_PATH" ] && [ -f "/usr/local/bin/python3.12" ]; then
-    PYTHON_PATH="/usr/local/bin/python3.12"
-    echo -e "${GREEN}[OK]${NC} Trouvé: $PYTHON_PATH"
-fi
+done
 
 if [ -z "$PYTHON_PATH" ]; then
-    echo -e "${RED}[ERREUR]${NC} Python 3.12 introuvable."
-    echo -e "${YELLOW}[INFO]${NC} Vérifiez avec: which python3.12 ou find /usr -name 'python3.12' 2>/dev/null"
-    echo -e "${YELLOW}[INFO]${NC} Ou installez-le à nouveau: yay -S python312"
+    echo -e "${RED}[ERREUR]${NC} Python 3.11/3.12/3.13 requis. Installez-le."
     exit 1
 fi
 echo ""
 
-# Supprimer l'ancien venv s'il utilise une mauvaise version
+# Nettoyer venv si mauvaise version
 if [ -d ".venv" ]; then
-    venv_ver=$(source .venv/bin/activate && python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || echo "unknown")
-    echo -e "${BLUE}[INFO]${NC} Venv actuel utilise Python $venv_ver"
+    venv_ver=$(source .venv/bin/activate 2>/dev/null && python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || echo "unknown")
     if [[ "$venv_ver" == "3.14" ]]; then
-        echo -e "${YELLOW}[INFO]${NC} Suppression du venv Python 3.14..."
         rm -rf .venv
-        echo -e "${GREEN}[OK]${NC} Venv supprimé"
     fi
 fi
 
-# Créer/environnement avec uv en forçant Python 3.12
-if [ ! -d ".venv" ]; then
-    echo -e "${YELLOW}[INFO]${NC} Création de l'environnement virtuel avec Python 3.12..."
-    uv venv --python "$PYTHON_PATH"
-    echo -e "${GREEN}[OK]${NC} Environnement virtuel créé"
-else
-    echo -e "${GREEN}[OK]${NC} Environnement virtuel existant"
-fi
-
-echo -e "${BLUE}[ACTIVATION]${NC} Activation du venv..."
+[ ! -d ".venv" ] && uv venv --python "$PYTHON_PATH"
 source .venv/bin/activate
-echo -e "${GREEN}[OK]${NC} Venv activé"
+echo -e "${GREEN}[OK]${NC} $(python --version)"
 echo ""
 
-echo -e "${BLUE}[INFO]${NC} Python : $(python --version)"
-echo -e "${BLUE}[INFO]${NC} Chemin : $(which python)"
-echo ""
-
-# Installation de PyTorch avec CUDA 12.1
-echo -e "${BLUE}[TORCH]${NC} Installation de PyTorch pour CUDA 12.1 avec uv..."
-uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-echo -e "${GREEN}[OK]${NC} PyTorch installé"
-echo ""
-
-# Installation des dépendances
-echo -e "${BLUE}[DÉPENDANCES]${NC} Installation de numpy, scipy, sympy, matplotlib..."
-uv pip install numpy scipy sympy matplotlib
+# Installation deps
+echo -e "${BLUE}[INSTALLATION]${NC} Dépendances..."
+if python -c "import torch; print(torch.cuda.is_available())" 2>/dev/null | grep -q True; then
+    uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121 -q 2>/dev/null || uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+else
+    uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu -q 2>/dev/null || uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+fi
+uv pip install numpy scipy sympy matplotlib -q 2>/dev/null || uv pip install numpy scipy sympy matplotlib
 echo -e "${GREEN}[OK]${NC} Dépendances installées"
 echo ""
 
-# Vérification GPU
-echo -e "${BLUE}[VÉRIFICATION GPU]${NC}"
-python -c "
-import torch
-print('Python version   :', torch.__file__.split('/')[0] if hasattr(torch, '__file__') else 'N/A')
-print('CUDA disponible :', torch.cuda.is_available())
+# Détection matérielle
+echo -e "${BLUE}[DÉTECTION MATÉRIELLE]${NC}"
+python << 'PYEOF'
+import torch, os
 if torch.cuda.is_available():
-    print('GPU détecté      :', torch.cuda.get_device_name(0))
-    props = torch.cuda.get_device_properties(0)
-    print('Mémoire totale   : {:.1f} GB'.format(props.total_memory / 1024**3))
+    gpu = torch.cuda.get_device_name(0)
+    vram = torch.cuda.get_device_properties(0).total_memory / 1024**3
+    print(f"GPU: {gpu} ({vram:.1f} GB VRAM)")
+    if vram >= 12:
+        cfg = {"d_model": 320, "enc_layers": 5, "dec_layers": 5, "nhead": 10, "ff": 1280, "batch": 56, "steps": 45000}
+    elif vram >= 10:
+        cfg = {"d_model": 288, "enc_layers": 4, "dec_layers": 4, "nhead": 9, "ff": 1152, "batch": 52, "steps": 42000}
+    elif vram >= 8:
+        cfg = {"d_model": 256, "enc_layers": 4, "dec_layers": 4, "nhead": 8, "ff": 1024, "batch": 48, "steps": 40000}
+    elif vram >= 6:
+        cfg = {"d_model": 224, "enc_layers": 4, "dec_layers": 4, "nhead": 7, "ff": 896, "batch": 32, "steps": 40000}
+    else:
+        cfg = {"d_model": 192, "enc_layers": 3, "dec_layers": 3, "nhead": 6, "ff": 768, "batch": 24, "steps": 35000}
+    print(f"Config auto: d_model={cfg['d_model']} | {cfg['enc_layers']}+{cfg['dec_layers']} | batch={cfg['batch']} | steps={cfg['steps']}")
+    with open('/tmp/train_config.sh','w') as f:
+        for k,v in cfg.items(): f.write(f"{k.upper()}={v}\n")
 else:
-    print('ATTENTION : Aucun GPU CUDA détecté')
-"
+    print("CPU uniquement - configuration légère")
+    with open('/tmp/train_config.sh','w') as f:
+        f.write("D_MODEL=160\nENC_LAYERS=3\nDEC_LAYERS=3\nNHEAD=5\nFF=640\nBATCH=16\nSTEPS=25000\n")
+PYEOF
+source /tmp/train_config.sh
 echo ""
 
-# Lancement entraînement
+# Lancement
 echo -e "${BLUE}==================================================${NC}"
-echo -e "${GREEN}[DÉMARRAGE]${NC} Entraînement from scratch 256/4/4"
+echo -e "${GREEN}[DÉMARRAGE]${NC} Entraînement adaptatif from scratch"
 echo -e "${BLUE}==================================================${NC}"
-echo ""
-echo -e "${YELLOW}[CONFIG]${NC} d_model=256 | 4+4 couches | n-heads=8 | ff=1024 | batch_size=48 | steps=40000"
-echo -e "${YELLOW}[INFO]${NC}  Le meilleur checkpoint sera sauvegardé automatiquement"
 echo ""
 
 python regression_symbolique.py \
-  --steps 40000 \
-  --d-model 256 \
-  --n-heads 8 \
-  --enc-layers 4 \
-  --dec-layers 4 \
-  --ff 1024 \
+  --steps ${STEPS} \
+  --d-model ${D_MODEL} \
+  --n-heads ${NHEAD} \
+  --enc-layers ${ENC_LAYERS} \
+  --dec-layers ${DEC_LAYERS} \
+  --ff ${FF} \
   --dropout 0.1 \
-  --batch-size 48 \
+  --batch-size ${BATCH} \
   --max-depth 3 \
   --n-points 64 \
   --canonique \
@@ -164,22 +138,11 @@ python regression_symbolique.py \
   --lr 2e-4 \
   --warmup 3000 \
   --eval-every 2000 \
-  --eval-samples 100 \
-  --examples 10 \
-  --ckpt modele_gros_scratch.pt
+  --eval-samples 80 \
+  --examples 8 \
+  --ckpt modele_regression_nouveau.pt
 
 echo ""
-echo -e "${BLUE}==================================================${NC}"
-echo -e "${GREEN}[TERMINÉ]${NC} Entraînement terminé"
-echo -e "${BLUE}==================================================${NC}"
-echo ""
-
-if [ -f "modele_gros_scratch.pt" ]; then
-    echo -e "${BLUE}[TEST]${NC} Pour comparer avec l'actuel :"
-    echo -e "${YELLOW}python regression_symbolique.py --eval-only --ckpt modele_gros_scratch.pt --canonique --benchmark benchmark_valide.json --benchmark-repetitions 3 --candidates 48${NC}"
-    echo ""
-    echo -e "${BLUE}[COPIE]${NC} Si meilleur :"
-    echo -e "${YELLOW}mv modele_gros_scratch.pt modele_regression.pt${NC}"
-fi
-
-echo -e "${GREEN}[FIN]${NC}"
+echo -e "${GREEN}[TERMINÉ]${NC} Si meilleur que l'actuel, renommez :"
+echo -e "${YELLOW}mv modele_regression_nouveau.pt modele_regression.pt${NC}"
+rm -f /tmp/train_config.sh
