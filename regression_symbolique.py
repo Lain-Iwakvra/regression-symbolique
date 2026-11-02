@@ -65,6 +65,9 @@ import os
 import random
 import sys
 import time
+import copy
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 
 import numpy as np
 
@@ -1973,6 +1976,21 @@ def sample_depth(rng, step, total, max_depth, enable=True):
     return max_depth - 1
 
 
+def _gen_batch_worker(args_seed, n_samples, n_points, max_depth, noise, x_range, max_len, canonique):
+    rng = random.Random(args_seed)
+    samples = []
+    for _ in range(n_samples):
+        try:
+            samples.append(generate_sample(
+                rng, n_points, max_depth, noise,
+                x_range, max_len,
+                canonique=canonique,
+                n_points_var=False, domaine_var=False))
+        except Exception:
+            pass
+    return samples
+
+
 def train(model, args, device, start_step=0):
     model.train()
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr,
@@ -1986,46 +2004,101 @@ def train(model, args, device, start_step=0):
     t0 = time.time()
     window = 0.0
 
+    use_amp = device.type == "cuda"
+    scaler = torch.cuda.amp.GradScaler() if use_amp else None
+
+    num_workers = int(getattr(args, "num_workers", 0) or 0)
+    executor = None
+    if num_workers > 0:
+        try:
+            ctx = mp.get_context("fork")
+            executor = ProcessPoolExecutor(max_workers=num_workers, mp_context=ctx)
+            print(f"génération parallèle: {num_workers} workers")
+        except Exception:
+            executor = None
+
     print(f"entraînement : {args.steps - start_step} étapes, "
           f"lot={args.batch_size}, d={args.d_model}, "
           f"points={args.n_points}, profondeur≤{args.max_depth}, "
           f"curriculum={'non' if args.no_curriculum else 'oui'}, "
-          f"appareil={device}")
+          f"appareil={device}, amp={'oui' if use_amp else 'non'}")
 
     for step in range(start_step + 1, args.steps + 1):
         samples = []
-        while len(samples) < args.batch_size:
+        if executor is not None and args.batch_size > 1:
             try:
-                samples.append(generate_sample(
-                    rng, args.n_points, args.max_depth, args.noise,
-                    args.x_range, args.max_len,
-                    canonique=getattr(args, "canonique", False),
-                    n_points_var=False, domaine_var=False))
-            except RuntimeError:
-                continue
+                futures = []
+                per = max(1, args.batch_size // num_workers)
+                for i in range(num_workers):
+                    s = per
+                    if i == num_workers - 1:
+                        s = args.batch_size - per * (num_workers - 1)
+                    if s <= 0:
+                        continue
+                    futures.append(executor.submit(
+                        _gen_batch_worker,
+                        args.seed + start_step + step * 131542391 + i,
+                        s, args.n_points, args.max_depth, args.noise,
+                        args.x_range, args.max_len,
+                        getattr(args, "canonique", False)))
+                for f in futures:
+                    samples.extend(f.result(timeout=30))
+            except Exception:
+                samples = []
+        if len(samples) < args.batch_size:
+            while len(samples) < args.batch_size:
+                try:
+                    samples.append(generate_sample(
+                        rng, args.n_points, args.max_depth, args.noise,
+                        args.x_range, args.max_len,
+                        canonique=getattr(args, "canonique", False),
+                        n_points_var=False, domaine_var=False))
+                except RuntimeError:
+                    continue
         batch = build_batch(samples, device, args.max_len)
 
-        logits, const_pred = model(batch["src"], batch["tgt_in"])
-        valid = target_valid_mask(batch["tgt_out"])
-        masked = logits.masked_fill(~valid, -1e4)
-        loss_sym = F.cross_entropy(
-            masked.reshape(-1, V), batch["tgt_out"].reshape(-1),
-            ignore_index=PAD_ID)
-
-        cmask = (batch["tgt_out"] == CONST_ID).float()
-        if getattr(args, "loss_const", "mse") == "huber":
-            ecarts = (const_pred - batch["const_tgt"]).abs()
-            perte = torch.where(ecarts <= 0.5, 0.5 * ecarts ** 2,
-                                0.5 * (ecarts - 0.25))
-        else:
-            perte = (const_pred - batch["const_tgt"]) ** 2
-        loss_c = (perte * cmask).sum() / cmask.sum().clamp(min=1.0)
-
-        loss = loss_sym + args.w_const * loss_c
         opt.zero_grad(set_to_none=True)
-        loss.backward()
-        nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        opt.step()
+        if use_amp:
+            with torch.cuda.amp.autocast():
+                logits, const_pred = model(batch["src"], batch["tgt_in"])
+                valid = target_valid_mask(batch["tgt_out"])
+                masked = logits.masked_fill(~valid, -1e4)
+                loss_sym = F.cross_entropy(
+                    masked.reshape(-1, V), batch["tgt_out"].reshape(-1),
+                    ignore_index=PAD_ID)
+                cmask = (batch["tgt_out"] == CONST_ID).float()
+                if getattr(args, "loss_const", "mse") == "huber":
+                    ecarts = (const_pred - batch["const_tgt"]).abs()
+                    perte = torch.where(ecarts <= 0.5, 0.5 * ecarts ** 2,
+                                        0.5 * (ecarts - 0.25))
+                else:
+                    perte = (const_pred - batch["const_tgt"]) ** 2
+                loss_c = (perte * cmask).sum() / cmask.sum().clamp(min=1.0)
+                loss = loss_sym + args.w_const * loss_c
+            scaler.scale(loss).backward()
+            scaler.unscale_(opt)
+            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            scaler.step(opt)
+            scaler.update()
+        else:
+            logits, const_pred = model(batch["src"], batch["tgt_in"])
+            valid = target_valid_mask(batch["tgt_out"])
+            masked = logits.masked_fill(~valid, -1e4)
+            loss_sym = F.cross_entropy(
+                masked.reshape(-1, V), batch["tgt_out"].reshape(-1),
+                ignore_index=PAD_ID)
+            cmask = (batch["tgt_out"] == CONST_ID).float()
+            if getattr(args, "loss_const", "mse") == "huber":
+                ecarts = (const_pred - batch["const_tgt"]).abs()
+                perte = torch.where(ecarts <= 0.5, 0.5 * ecarts ** 2,
+                                    0.5 * (ecarts - 0.25))
+            else:
+                perte = (const_pred - batch["const_tgt"]) ** 2
+            loss_c = (perte * cmask).sum() / cmask.sum().clamp(min=1.0)
+            loss = loss_sym + args.w_const * loss_c
+            loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            opt.step()
         sched.step()
         window += 1
 
@@ -2080,8 +2153,8 @@ def load_or_build(args, device):
         if missing or unexpected:
             print(f"checkpoint chargé avec compatibilité : manquants={len(missing)}, inattendus={len(unexpected)}")
         try:
-            if os.environ.get("RS_COMPILE", "1") == "1" and device.type == "cpu":
-                model = torch.compile(model, mode="reduce-overhead")
+            if os.environ.get("RS_COMPILE", "1") == "1":
+                model = torch.compile(model, mode="reduce-overhead" if device.type == "cpu" else "default")
         except Exception:
             pass
         print(f"checkpoint chargé : {args.ckpt} (étape {ckpt.get('step', '?')})")
@@ -2096,8 +2169,8 @@ def load_or_build(args, device):
           "max_len": args.max_len}
     model = SymbolicRegressor(**hp).to(device)
     try:
-        if os.environ.get("RS_COMPILE", "1") == "1" and device.type == "cpu" and not args.eval_only:
-            model = torch.compile(model, mode="reduce-overhead")
+        if os.environ.get("RS_COMPILE", "1") == "1" and not args.eval_only:
+            model = torch.compile(model, mode="reduce-overhead" if device.type == "cpu" else "default")
     except Exception:
         pass
     return model, 0
@@ -2267,6 +2340,8 @@ def parse_args(argv=None):
                    help="ne pas entraîner, juste évaluer")
     p.add_argument("--device", default="auto",
                    help="auto | cpu | cuda | cuda:N")
+    p.add_argument("--num-workers", type=int, default=0,
+                   help="workers multiprocessing pour générer les lots (0 = synchrone)")
     p.add_argument("--predict", default=None, metavar='"x1,y1;x2,y2;..."',
                    help="prédire une formule à partir de points fournis")
     p.add_argument("--predict-file", default=None, metavar="fichier.csv",
