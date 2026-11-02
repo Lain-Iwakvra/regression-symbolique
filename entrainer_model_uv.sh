@@ -128,19 +128,20 @@ if torch.cuda.is_available():
     gpu = torch.cuda.get_device_name(0)
     vram = torch.cuda.get_device_properties(0).total_memory / 1024**3
     print(f"GPU: {gpu} ({vram:.1f} GB VRAM)")
-    if vram >= 16:
+    vram_eff = vram * 0.92  # marge pour overhead
+    if vram_eff >= 14:
         cfg = {"d_model": 384, "enc_layers": 6, "dec_layers": 6, "nhead": 12, "ff": 1536, "batch": 96, "steps": 50000}
-    elif vram >= 12:
+    elif vram_eff >= 11.5:
         cfg = {"d_model": 320, "enc_layers": 5, "dec_layers": 5, "nhead": 10, "ff": 1280, "batch": 96, "steps": 48000}
-    elif vram >= 10:
+    elif vram_eff >= 9.5:
         cfg = {"d_model": 288, "enc_layers": 5, "dec_layers": 5, "nhead": 9, "ff": 1152, "batch": 80, "steps": 45000}
-    elif vram >= 8:
+    elif vram_eff >= 7.5:
         cfg = {"d_model": 256, "enc_layers": 4, "dec_layers": 5, "nhead": 8, "ff": 1024, "batch": 72, "steps": 42000}
-    elif vram >= 6:
+    elif vram_eff >= 5.5:
         cfg = {"d_model": 224, "enc_layers": 4, "dec_layers": 4, "nhead": 7, "ff": 896, "batch": 48, "steps": 40000}
     else:
         cfg = {"d_model": 192, "enc_layers": 4, "dec_layers": 4, "nhead": 6, "ff": 768, "batch": 32, "steps": 38000}
-    print(f"Config GPU: d_model={cfg['d_model']} | {cfg['enc_layers']}+{cfg['dec_layers']} | batch={cfg['batch']} | steps={cfg['steps']} | ff={cfg['ff']}")
+    print(f"Config GPU (VRAM eff ~{vram_eff:.1f}GB): d_model={cfg['d_model']} | {cfg['enc_layers']}+{cfg['dec_layers']} | batch={cfg['batch']} | steps={cfg['steps']} | ff={cfg['ff']}")
     with open('/tmp/train_config.sh','w') as f:
         for k,v in cfg.items(): f.write(f"{k.upper()}={v}\n")
 else:
