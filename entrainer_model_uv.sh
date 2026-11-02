@@ -24,9 +24,12 @@ echo -e "${GREEN}[INFO]${NC} Répertoire de travail : $SCRIPT_DIR"
 echo ""
 
 # Vérification des fichiers requis
-for f in regression_symbolique.py benchmark_valide.json; do
+for f in regression_symbolique.py; do
     if [ -f "$f" ]; then
         echo -e "${GREEN}[OK]${NC} $f"
+    else
+        echo -e "${RED}[ERREUR]${NC} $f manquant"
+        exit 1
     fi
 done
 echo ""
