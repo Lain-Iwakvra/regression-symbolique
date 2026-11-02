@@ -66,6 +66,23 @@ if [ -z "$PYTHON_PATH" ]; then
 fi
 echo ""
 
+# Détection GPU NVIDIA (RTX/GTX)
+HAS_NVIDIA=0
+if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
+    HAS_NVIDIA=1
+    echo -e "${GREEN}[OK]${NC} nvidia-smi détecté"
+    nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader 2>/dev/null | head -1
+fi
+if [ $HAS_NVIDIA -eq 0 ] && [ -e /dev/nvidia0 ] || [ -e /dev/nvidiactl ] || [ -e /dev/nvidia-uvm ]; then
+    HAS_NVIDIA=1
+    echo -e "${GREEN}[OK]${NC} Périphériques NVIDIA détectés"
+fi
+if [ $HAS_NVIDIA -eq 0 ] && command -v lspci >/dev/null 2>&1 && lspci | grep -qi "nvidia"; then
+    HAS_NVIDIA=1
+    echo -e "${GREEN}[OK]${NC} Carte NVIDIA détectée via lspci"
+fi
+echo ""
+
 # Nettoyer venv si mauvaise version
 if [ -d ".venv" ]; then
     venv_ver=$(source .venv/bin/activate 2>/dev/null && python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || echo "unknown")
@@ -81,10 +98,23 @@ echo ""
 
 # Installation deps
 echo -e "${BLUE}[INSTALLATION]${NC} Dépendances..."
-if python -c "import torch; print(torch.cuda.is_available())" 2>/dev/null | grep -q True; then
-    uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121 -q 2>/dev/null || uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+FORCE_CUDA=${FORCE_CUDA:-0}
+FORCE_CPU=${FORCE_CPU:-0}
+if [ $FORCE_CPU -eq 1 ]; then
+    echo -e "${YELLOW}[INFO]${NC} FORCE_CPU=1 -> PyTorch CPU"
+    uv pip uninstall torch torchvision torchaudio -y >/dev/null 2>&1 || true
+    uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+elif [ $HAS_NVIDIA -eq 1 ] || [ $FORCE_CUDA -eq 1 ]; then
+    echo -e "${YELLOW}[INFO]${NC} Tentative d'installation PyTorch CUDA (cu121)..."
+    uv pip uninstall torch torchvision torchaudio -y >/dev/null 2>&1 || true
+    uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 else
-    uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu -q 2>/dev/null || uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+    if python -c "import torch; print(torch.cuda.is_available())" 2>/dev/null | grep -q True; then
+        echo -e "${YELLOW}[INFO]${NC} PyTorch CUDA déjà présent"
+    else
+        echo -e "${YELLOW}[INFO]${NC} Installation de PyTorch CPU"
+        uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+    fi
 fi
 uv pip install numpy scipy sympy matplotlib -q 2>/dev/null || uv pip install numpy scipy sympy matplotlib
 echo -e "${GREEN}[OK]${NC} Dépendances installées"
@@ -110,13 +140,13 @@ if torch.cuda.is_available():
         cfg = {"d_model": 224, "enc_layers": 4, "dec_layers": 4, "nhead": 7, "ff": 896, "batch": 48, "steps": 40000}
     else:
         cfg = {"d_model": 192, "enc_layers": 4, "dec_layers": 4, "nhead": 6, "ff": 768, "batch": 32, "steps": 38000}
-    print(f"Config auto: d_model={cfg['d_model']} | {cfg['enc_layers']}+{cfg['dec_layers']} | batch={cfg['batch']} | steps={cfg['steps']} | ff={cfg['ff']}")
+    print(f"Config GPU: d_model={cfg['d_model']} | {cfg['enc_layers']}+{cfg['dec_layers']} | batch={cfg['batch']} | steps={cfg['steps']} | ff={cfg['ff']}")
     with open('/tmp/train_config.sh','w') as f:
         for k,v in cfg.items(): f.write(f"{k.upper()}={v}\n")
 else:
-    print("CPU uniquement - configuration optimisée")
+    print("CUDA non détecté - passage en mode CPU haute qualité")
     with open('/tmp/train_config.sh','w') as f:
-        f.write("D_MODEL=192\nENC_LAYERS=4\nDEC_LAYERS=4\nNHEAD=6\nFF=768\nBATCH=32\nSTEPS=32000\n")
+        f.write("D_MODEL=320\nENC_LAYERS=5\nDEC_LAYERS=5\nNHEAD=10\nFF=1280\nBATCH=64\nSTEPS=45000\n")
 PYEOF
 source /tmp/train_config.sh
 echo ""
@@ -146,7 +176,7 @@ python regression_symbolique.py \
   --eval-every 1000 \
   --eval-samples 100 \
   --examples 10 \
-  --num-workers 6 \
+  --num-workers 8 \
   --ckpt modele_regression_nouveau.pt
 
 echo ""
