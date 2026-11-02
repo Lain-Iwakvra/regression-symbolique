@@ -515,12 +515,21 @@ class Application:
         self.mode_trace = bool(self.var_mode_trace.get())
         if self.mode_trace:
             self.var_etat.set("Mode tracé : cliquez sur le graphique pour ajouter des points. Utilisez 'Effacer points' pour recommencer.")
-            self.entree.configure(state="disabled")
+            try:
+                self.entree.configure(state="disabled")
+            except Exception:
+                pass
             if self.points_manuel_x:
                 self.var_points.set(len(self.points_manuel_x))
         else:
             self.var_etat.set("Mode formule : entrez f(x) ou choisissez un exemple.")
-            self.entree.configure(state="normal")
+            try:
+                self.entree.configure(state="normal")
+            except Exception:
+                pass
+            # Si on passe en mode fonction, on peut garder les points tracés visibles mais on utilisera la formule
+            if self.points_manuel_x:
+                self._maj_affichage_points_manuel()
 
     def _effacer_points(self):
         self.points_manuel_x = []
@@ -582,7 +591,7 @@ class Application:
                 bruit = float(self.var_bruit.get())
                 candidats = int(self.var_candidats.get())
                 affinage = int(self.var_affinage.get())
-                f = None  # pas de fonction connue
+                f = None
             else:
                 f = compiler_fonction(self.var_fonction.get())
                 n_points = int(self.var_points.get())
@@ -607,8 +616,14 @@ class Application:
         self.opt.candidates = candidats
         self.opt.refine = affinage
         self.en_cours = True
-        self.bouton.configure(state="disabled")
-        self.barre.start(12)
+        try:
+            self.bouton.configure(state="disabled")
+        except Exception:
+            pass
+        try:
+            self.barre.start(12)
+        except Exception:
+            pass
         if self.mode_trace and self.points_manuel_x:
             self.var_etat.set(f"Le modèle cherche une formule à partir de {n_points} points tracés "
                               f"({candidats} candidats, affinage de {affinage})…")
@@ -658,7 +673,7 @@ class Application:
             res = {
                 "x": x_m, "y": y_m,
                 "xd": xd,
-                "y_true": rs.eval_tree(tree, xd),
+                "y_true": None,
                 "y_pred": rs.eval_tree(tree, xd),
                 "tree": tree,
                 "brut": rs.tree_to_str(brut) if brut is not None else "",
@@ -694,6 +709,13 @@ class Application:
         # Remettre à zéro le graphique et tracer
         self.axes.clear()
         self.axes.set_facecolor("#ffffff")
+        # Tracer la vraie fonction si disponible
+        if "y_true" in res and res["y_true"] is not None:
+            try:
+                self.axes.plot(res["xd"], res["y_true"], color=COULEUR_REELLE, lw=2.2,
+                               label="votre fonction")
+            except Exception:
+                pass
         self.axes.plot(res["xd"], res["y_pred"], color=COULEUR_PREDITE, lw=2.0,
                        ls="--", label="formule de l'IA")
         self.axes.scatter(res["x"], res["y"], s=34, color=COULEUR_POINTS,
@@ -709,12 +731,20 @@ class Application:
             self.scatter_manuel = self.axes.scatter(self.points_manuel_x, self.points_manuel_y,
                                                     s=60, color="#16a34a", edgecolor="white",
                                                     linewidth=1.0, zorder=4, label="points tracés")
-        lo, hi = limites_verticales(res["y_pred"])
-        lo2, hi2 = limites_verticales(res["y"])
-        lo = min(lo, lo2)
-        hi = max(hi, hi2)
-        self.axes.set_ylim(lo, hi)
-        self.axes.set_xlim(res["xd"][0], res["xd"][-1])
+        try:
+            lo, hi = limites_verticales(res["y_pred"])
+            lo2, hi2 = limites_verticales(res["y"])
+            if "y_true" in res and res["y_true"] is not None:
+                lo3, hi3 = limites_verticales(res["y_true"])
+                lo = min(lo, lo2, lo3)
+                hi = max(hi, hi2, hi3)
+            else:
+                lo = min(lo, lo2)
+                hi = max(hi, hi2)
+            self.axes.set_ylim(lo, hi)
+            self.axes.set_xlim(res["xd"][0], res["xd"][-1])
+        except Exception:
+            pass
         self.axes.grid(True, color="#e5e7eb", lw=0.8)
         self.axes.axhline(0.0, color="#9ca3af", lw=0.8)
         self.axes.set_xlabel("x")
