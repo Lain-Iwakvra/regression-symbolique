@@ -1,6 +1,6 @@
 # Régression Symbolique
 
-Un Transformer qui retrouve la **formule mathématique** d'une fonction à partir d'un nuage de points.
+Un réseau de neurones Transformer qui retrouve la **formule mathématique** d'une fonction à partir d'un nuage de points.
 
 ## Principe
 
@@ -42,8 +42,6 @@ pip install torch torchvision torchaudio --index-url https://download.pytorch.or
 pip install numpy scipy sympy matplotlib
 ```
 
-Le modèle `modele_regression.pt` est déjà inclus dans le dépôt.
-
 ## Utilisation
 
 ### Interface graphique
@@ -70,14 +68,11 @@ python interface.py --verifier "2.5*x - 1" --points 64
 
 ### Entraîner un modèle
 
-Le script s'adapte automatiquement à votre matériel (GPU ou CPU).
-
 ```bash
 ./entrainer_model_uv.sh
 ```
 
-- **Avec GPU** : Détecte automatiquement VRAM et choisit la meilleure configuration
-- **Avec CPU** : Utilise une configuration plus légère (plus lent, mais fonctionnel)
+Le script s'adapte automatiquement à votre matériel (GPU avec détection VRAM, ou CPU).
 
 ## Fichiers
 
