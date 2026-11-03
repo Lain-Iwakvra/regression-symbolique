@@ -1,6 +1,6 @@
 #!/bin/bash
 # Script d'entraînement automatisé avec uv - Régression symbolique (from scratch)
-# S'adapte automatiquement à la configuration matérielle
+# Config fixe optimisée pour dépasser le modèle actuel
 
 set -e
 
@@ -12,7 +12,7 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 echo -e "${BLUE}==================================================${NC}"
-echo -e "${BLUE}   ENTRAÎNEMENT ADAPTATIF - FROM SCRATCH${NC}"
+echo -e "${BLUE}   ENTRAÎNEMENT FIXE - MODELE PERFORMANT${NC}"
 echo -e "${BLUE}==================================================${NC}"
 echo ""
 
@@ -66,23 +66,6 @@ if [ -z "$PYTHON_PATH" ]; then
 fi
 echo ""
 
-# Détection GPU NVIDIA (RTX/GTX)
-HAS_NVIDIA=0
-if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
-    HAS_NVIDIA=1
-    echo -e "${GREEN}[OK]${NC} nvidia-smi détecté"
-    nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader 2>/dev/null | head -1
-fi
-if [ $HAS_NVIDIA -eq 0 ] && [ -e /dev/nvidia0 ] || [ -e /dev/nvidiactl ] || [ -e /dev/nvidia-uvm ]; then
-    HAS_NVIDIA=1
-    echo -e "${GREEN}[OK]${NC} Périphériques NVIDIA détectés"
-fi
-if [ $HAS_NVIDIA -eq 0 ] && command -v lspci >/dev/null 2>&1 && lspci | grep -qi "nvidia"; then
-    HAS_NVIDIA=1
-    echo -e "${GREEN}[OK]${NC} Carte NVIDIA détectée via lspci"
-fi
-echo ""
-
 # Nettoyer venv si mauvaise version
 if [ -d ".venv" ]; then
     venv_ver=$(source .venv/bin/activate 2>/dev/null && python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || echo "unknown")
@@ -98,83 +81,49 @@ echo ""
 
 # Installation deps
 echo -e "${BLUE}[INSTALLATION]${NC} Dépendances..."
-FORCE_CUDA=${FORCE_CUDA:-0}
 FORCE_CPU=${FORCE_CPU:-0}
 if [ $FORCE_CPU -eq 1 ]; then
     echo -e "${YELLOW}[INFO]${NC} FORCE_CPU=1 -> PyTorch CPU"
     uv pip uninstall torch torchvision torchaudio -y >/dev/null 2>&1 || true
     uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-elif [ $HAS_NVIDIA -eq 1 ] || [ $FORCE_CUDA -eq 1 ]; then
-    echo -e "${YELLOW}[INFO]${NC} Tentative d'installation PyTorch CUDA (cu121)..."
-    uv pip uninstall torch torchvision torchaudio -y >/dev/null 2>&1 || true
-    uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 else
     if python -c "import torch; print(torch.cuda.is_available())" 2>/dev/null | grep -q True; then
-        echo -e "${YELLOW}[INFO]${NC} PyTorch CUDA déjà présent"
+        echo -e "${YELLOW}[INFO]${NC} PyTorch CUDA détecté"
     else
-        echo -e "${YELLOW}[INFO]${NC} Installation de PyTorch CPU"
-        uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+        echo -e "${YELLOW}[INFO]${NC} Tentative d'installation PyTorch CUDA (cu121)..."
+        uv pip uninstall torch torchvision torchaudio -y >/dev/null 2>&1 || true
+        uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121 || uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
     fi
 fi
 uv pip install numpy scipy sympy matplotlib -q 2>/dev/null || uv pip install numpy scipy sympy matplotlib
 echo -e "${GREEN}[OK]${NC} Dépendances installées"
 echo ""
 
-# Détection matérielle
-echo -e "${BLUE}[DÉTECTION MATÉRIELLE]${NC}"
-python << 'PYEOF'
-import torch, os
-if torch.cuda.is_available():
-    gpu = torch.cuda.get_device_name(0)
-    vram = torch.cuda.get_device_properties(0).total_memory / 1024**3
-    print(f"GPU: {gpu} ({vram:.1f} GB VRAM)")
-    if vram >= 14:
-        cfg = {"d_model": 384, "enc_layers": 6, "dec_layers": 6, "nhead": 12, "ff": 1536, "batch": 96, "steps": 50000}
-    elif vram >= 11.0:
-        cfg = {"d_model": 320, "enc_layers": 5, "dec_layers": 5, "nhead": 10, "ff": 1280, "batch": 96, "steps": 48000}
-    elif vram >= 10.0:
-        cfg = {"d_model": 320, "enc_layers": 5, "dec_layers": 5, "nhead": 10, "ff": 1280, "batch": 80, "steps": 46000}
-    elif vram >= 9.0:
-        cfg = {"d_model": 288, "enc_layers": 5, "dec_layers": 5, "nhead": 9, "ff": 1152, "batch": 80, "steps": 45000}
-    elif vram >= 7.5:
-        cfg = {"d_model": 256, "enc_layers": 4, "dec_layers": 5, "nhead": 8, "ff": 1024, "batch": 72, "steps": 42000}
-    elif vram >= 6.0:
-        cfg = {"d_model": 224, "enc_layers": 4, "dec_layers": 4, "nhead": 7, "ff": 896, "batch": 48, "steps": 40000}
-    else:
-        cfg = {"d_model": 192, "enc_layers": 4, "dec_layers": 4, "nhead": 6, "ff": 768, "batch": 32, "steps": 38000}
-    print(f"Config GPU: d_model={cfg['d_model']} | {cfg['enc_layers']}+{cfg['dec_layers']} | batch={cfg['batch']} | steps={cfg['steps']} | ff={cfg['ff']}")
-    with open('/tmp/train_config.sh','w') as f:
-        for k,v in cfg.items(): f.write(f"{k.upper()}={v}\n")
-else:
-    print("CUDA non détecté - passage en mode CPU haute qualité")
-    with open('/tmp/train_config.sh','w') as f:
-        f.write("D_MODEL=320\nENC_LAYERS=5\nDEC_LAYERS=5\nNHEAD=10\nFF=1280\nBATCH=64\nSTEPS=45000\n")
-PYEOF
-source /tmp/train_config.sh
+echo -e "${BLUE}[CONFIG]${NC} d_model=320 | enc=5, dec=5 | heads=10 | ff=1280 | batch=64 | steps=65000 | lr=2.5e-4 | warmup=2500 | max_depth=4 | canonique + huber"
 echo ""
 
 # Lancement
 echo -e "${BLUE}==================================================${NC}"
-echo -e "${GREEN}[DÉMARRAGE]${NC} Entraînement adaptatif from scratch"
+echo -e "${GREEN}[DÉMARRAGE]${NC} Entraînement"
 echo -e "${BLUE}==================================================${NC}"
 echo ""
 
 python regression_symbolique.py \
-  --steps ${STEPS} \
-  --d-model ${D_MODEL} \
-  --n-heads ${NHEAD} \
-  --enc-layers ${ENC_LAYERS} \
-  --dec-layers ${DEC_LAYERS} \
-  --ff ${FF} \
+  --steps 65000 \
+  --d-model 320 \
+  --n-heads 10 \
+  --enc-layers 5 \
+  --dec-layers 5 \
+  --ff 1280 \
   --dropout 0.08 \
-  --batch-size ${BATCH} \
+  --batch-size 64 \
   --max-depth 4 \
   --n-points 64 \
   --canonique \
   --loss-const huber \
-  --w-const 1.2 \
-  --lr 3e-4 \
-  --warmup 1500 \
+  --w-const 1.1 \
+  --lr 2.5e-4 \
+  --warmup 2500 \
   --eval-every 1000 \
   --eval-samples 100 \
   --examples 10 \
@@ -184,4 +133,3 @@ python regression_symbolique.py \
 echo ""
 echo -e "${GREEN}[TERMINÉ]${NC} Si meilleur que l'actuel, renommez :"
 echo -e "${YELLOW}mv modele_regression_nouveau.pt modele_regression.pt${NC}"
-rm -f /tmp/train_config.sh
