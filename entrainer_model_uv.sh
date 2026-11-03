@@ -1,6 +1,6 @@
 #!/bin/bash
 # Script d'entraînement automatisé avec uv - Régression symbolique (from scratch)
-# Config fixe optimisée pour dépasser le modèle actuel
+# Progressif : légèrement plus gros que le modèle actuel
 
 set -e
 
@@ -12,7 +12,7 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 echo -e "${BLUE}==================================================${NC}"
-echo -e "${BLUE}   ENTRAÎNEMENT FIXE - MODELE PERFORMANT${NC}"
+echo -e "${BLUE}   ENTRAÎNEMENT PROGRESSIF - d_model 288${NC}"
 echo -e "${BLUE}==================================================${NC}"
 echo ""
 
@@ -99,37 +99,37 @@ uv pip install numpy scipy sympy matplotlib -q 2>/dev/null || uv pip install num
 echo -e "${GREEN}[OK]${NC} Dépendances installées"
 echo ""
 
-echo -e "${BLUE}[CONFIG]${NC} d_model=320 | enc=5, dec=5 | heads=10 | ff=1280 | batch=64 | steps=65000 | lr=2.5e-4 | warmup=2500 | max_depth=4 | canonique + huber"
+echo -e "${BLUE}[CONFIG]${NC} d_model=288 | enc=4, dec=4 | heads=9 | ff=1152 | batch=64 | steps=35000 | lr=3e-4 | warmup=1500 | max_depth=4 | canonique + huber"
 echo ""
 
 # Lancement
 echo -e "${BLUE}==================================================${NC}"
-echo -e "${GREEN}[DÉMARRAGE]${NC} Entraînement"
+echo -e "${GREEN}[DÉMARRAGE]${NC} Entraînement progressif"
 echo -e "${BLUE}==================================================${NC}"
 echo ""
 
 python regression_symbolique.py \
-  --steps 65000 \
-  --d-model 320 \
-  --n-heads 10 \
-  --enc-layers 5 \
-  --dec-layers 5 \
-  --ff 1280 \
+  --steps 35000 \
+  --d-model 288 \
+  --n-heads 9 \
+  --enc-layers 4 \
+  --dec-layers 4 \
+  --ff 1152 \
   --dropout 0.08 \
   --batch-size 64 \
   --max-depth 4 \
   --n-points 64 \
   --canonique \
   --loss-const huber \
-  --w-const 1.1 \
-  --lr 2.5e-4 \
-  --warmup 2500 \
+  --w-const 1.2 \
+  --lr 3e-4 \
+  --warmup 1500 \
   --eval-every 1000 \
   --eval-samples 100 \
   --examples 10 \
   --num-workers 8 \
-  --ckpt modele_regression_nouveau.pt
+  --ckpt modele_regression_m288.pt
 
 echo ""
-echo -e "${GREEN}[TERMINÉ]${NC} Si meilleur que l'actuel, renommez :"
-echo -e "${YELLOW}mv modele_regression_nouveau.pt modele_regression.pt${NC}"
+echo -e "${GREEN}[TERMINÉ]${NC} Comparer avec modele_regression.pt (étape 28000, best 0.69)"
+echo -e "${YELLOW}Si meilleur : mv modele_regression_m288.pt modele_regression.pt${NC}"
