@@ -85,4 +85,20 @@ Le script s'adapte automatiquement à votre matériel (GPU avec détection VRAM,
 
 ## Licence
 
+## Modèle
+
+| Paramètre | Valeur |
+|---|---|
+| Architecture | Transformer encodeur-décodeur |
+| `d_model` | 256 |
+| Couches encodeur / décodeur | 4 / 4 |
+| Têtes d'attention | 8 |
+| Dimension FFN | 1024 |
+| Paramètres | ~7.4M |
+| Points d'entrée | 4-256 |
+| Longueur max formule | 64 tokens |
+| Entraîné | 28000 étapes |
+
+## Licence
+
 MIT
