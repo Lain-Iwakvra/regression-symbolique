@@ -108,6 +108,13 @@ echo -e "${GREEN}[DÉMARRAGE]${NC} Entraînement progressif"
 echo -e "${BLUE}==================================================${NC}"
 echo ""
 
+if [ -f "modele_regression_m288.pt" ]; then
+  echo -e "${YELLOW}[INFO]${NC} Checkpoint existant trouvé - reprise automatique"
+  RESUME_FLAG="--resume"
+else
+  RESUME_FLAG=""
+fi
+
 python regression_symbolique.py \
   --steps 35000 \
   --d-model 288 \
@@ -128,7 +135,8 @@ python regression_symbolique.py \
   --eval-samples 100 \
   --examples 10 \
   --num-workers 8 \
-  --ckpt modele_regression_m288.pt
+  --ckpt modele_regression_m288.pt \
+  $RESUME_FLAG
 
 echo ""
 echo -e "${GREEN}[TERMINÉ]${NC} Comparer avec modele_regression.pt (étape 28000, best 0.69)"
