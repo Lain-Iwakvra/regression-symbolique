@@ -2077,27 +2077,41 @@ def train(model, args, device, start_step=0):
         batch = build_batch(samples, device, args.max_len)
 
         opt.zero_grad(set_to_none=True)
-        if use_amp:
+        if use_amp and scaler is not None:
             try:
                 with torch.amp.autocast('cuda'):
                     logits, const_pred = model(batch["src"], batch["tgt_in"])
+                    valid = target_valid_mask(batch["tgt_out"])
+                    masked = logits.masked_fill(~valid, -1e4)
+                    loss_sym = F.cross_entropy(
+                        masked.reshape(-1, V), batch["tgt_out"].reshape(-1),
+                        ignore_index=PAD_ID)
+                    cmask = (batch["tgt_out"] == CONST_ID).float()
+                    if getattr(args, "loss_const", "mse") == "huber":
+                        ecarts = (const_pred - batch["const_tgt"]).abs()
+                        perte = torch.where(ecarts <= 0.5, 0.5 * ecarts ** 2,
+                                            0.5 * (ecarts - 0.25))
+                    else:
+                        perte = (const_pred - batch["const_tgt"]) ** 2
+                    loss_c = (perte * cmask).sum() / cmask.sum().clamp(min=1.0)
+                    loss = loss_sym + args.w_const * loss_c
             except Exception:
                 with torch.cuda.amp.autocast():
                     logits, const_pred = model(batch["src"], batch["tgt_in"])
-                valid = target_valid_mask(batch["tgt_out"])
-                masked = logits.masked_fill(~valid, -1e4)
-                loss_sym = F.cross_entropy(
-                    masked.reshape(-1, V), batch["tgt_out"].reshape(-1),
-                    ignore_index=PAD_ID)
-                cmask = (batch["tgt_out"] == CONST_ID).float()
-                if getattr(args, "loss_const", "mse") == "huber":
-                    ecarts = (const_pred - batch["const_tgt"]).abs()
-                    perte = torch.where(ecarts <= 0.5, 0.5 * ecarts ** 2,
-                                        0.5 * (ecarts - 0.25))
-                else:
-                    perte = (const_pred - batch["const_tgt"]) ** 2
-                loss_c = (perte * cmask).sum() / cmask.sum().clamp(min=1.0)
-                loss = loss_sym + args.w_const * loss_c
+                    valid = target_valid_mask(batch["tgt_out"])
+                    masked = logits.masked_fill(~valid, -1e4)
+                    loss_sym = F.cross_entropy(
+                        masked.reshape(-1, V), batch["tgt_out"].reshape(-1),
+                        ignore_index=PAD_ID)
+                    cmask = (batch["tgt_out"] == CONST_ID).float()
+                    if getattr(args, "loss_const", "mse") == "huber":
+                        ecarts = (const_pred - batch["const_tgt"]).abs()
+                        perte = torch.where(ecarts <= 0.5, 0.5 * ecarts ** 2,
+                                            0.5 * (ecarts - 0.25))
+                    else:
+                        perte = (const_pred - batch["const_tgt"]) ** 2
+                    loss_c = (perte * cmask).sum() / cmask.sum().clamp(min=1.0)
+                    loss = loss_sym + args.w_const * loss_c
             scaler.scale(loss).backward()
             scaler.unscale_(opt)
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
