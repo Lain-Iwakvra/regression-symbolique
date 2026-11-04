@@ -8,10 +8,11 @@ Le modèle encode un nuage `(x, y)` et décode l'expression sous forme d'arbre s
 
 ## Fonctionnalités
 
-- **Interface graphique** (`interface.py`) - Saisir `f(x)`, générer un nuage de points et voir la formule retrouvée
+- **Interface graphique** (`interface.py`) - Saisir `f(x)`, générer un nuage de points ou tracer à la souris pour retrouver la formule
 - **Tracer à la souris** - Placer manuellement des points sur le graphique et laisser l'IA deviner la formule
+- **Import CSV** - Charger des points depuis un fichier CSV
 - **Ligne de commande** - `--predict`, `--predict-file`, `--verifier`
-- **Polyvalent** - Fonctionne avec différents nombres de points et domaines
+- **Polyvalent** - Fonctionne avec différents nombres de points (4-256) et domaines
 - **Affinage automatique** - Beam search, dédoublonnage canonique, optimisation des constantes
 
 ## Installation
@@ -35,7 +36,7 @@ uv pip install numpy scipy sympy matplotlib
 ### Avec pip
 
 ```bash
-python3 -m venv .venv
+python -m venv .venv
 source .venv/bin/activate
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121  # GPU
 # ou: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu  # CPU
@@ -51,7 +52,8 @@ python interface.py
 ```
 
 - **Mode fonction** : Entrer `f(x)` et cliquer sur "Prédire la fonction"
-- **Mode tracé manuel** : Cocher "tracer à la souris", cliquer sur le graphique pour placer des points, puis "Prédire la fonction"
+- **Mode tracé manuel** : Sélectionner "Tracer des points", cliquer sur le graphique pour placer des points, puis prédire
+- **Mode CSV** : Charger un fichier CSV avec des points `(x,y)`
 
 ### Ligne de commande
 
@@ -59,10 +61,10 @@ python interface.py
 # Depuis des points
 python regression_symbolique.py --predict "0,0;1,1;2,4;3,9"
 
-# Depuis un fichier
+# Depuis un fichier CSV/TXT
 python regression_symbolique.py --predict-file points.csv
 
-# Test rapide sans interface
+# Vérifier une formule
 python interface.py --verifier "2.5*x - 1" --points 64
 ```
 
@@ -72,18 +74,13 @@ python interface.py --verifier "2.5*x - 1" --points 64
 ./entrainer_model_uv.sh
 ```
 
-Le script s'adapte automatiquement à votre matériel (GPU avec détection VRAM, ou CPU).
+Le script est configurable via des variables d'environnement. Voir le script pour plus de détails.
 
-## Fichiers
+### Comparer des modèles
 
-| Fichier | Description |
-|---|---|
-| `regression_symbolique.py` | Cœur du modèle, entraînement et inférence |
-| `interface.py` | Interface graphique Tkinter + Matplotlib |
-| `entrainer_model_uv.sh` | Script d'entraînement adaptatif (GPU/CPU) |
-| `modele_regression.pt` | Modèle pré-entraîné |
-
-## Licence
+```bash
+python comparer_modeles.py modele_regression.pt autre_modele.pt --samples 200 --seed 1234 --candidates 48 --refine 8
+```
 
 ## Modèle
 
@@ -97,7 +94,16 @@ Le script s'adapte automatiquement à votre matériel (GPU avec détection VRAM,
 | Paramètres | ~7.4M |
 | Points d'entrée | 4-256 |
 | Longueur max formule | 64 tokens |
-| Entraîné | 28000 étapes |
+
+## Fichiers
+
+| Fichier | Description |
+|---|---|
+| `regression_symbolique.py` | Cœur du modèle, entraînement et inférence |
+| `interface.py` | Interface graphique Tkinter + Matplotlib |
+| `entrainer_model_uv.sh` | Script d'entraînement configurable (GPU/CPU) |
+| `comparer_modeles.py` | Comparaison de modèles sur des fonctions identiques |
+| `modele_regression.pt` | Modèle pré-entraîné |
 
 ## Licence
 
