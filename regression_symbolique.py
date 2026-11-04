@@ -1638,6 +1638,18 @@ def predict_tree(model, sample, args, device):
             gen = None
 
     model.eval()
+    with torch.no_grad():
+        if device.type == "cuda":
+            try:
+                with torch.cuda.amp.autocast():
+                    return _predict_tree_inner(model, sample, args, device, x, y, src, penalite, rng, gen)
+            except Exception:
+                return _predict_tree_inner(model, sample, args, device, x, y, src, penalite, rng, gen)
+        else:
+            return _predict_tree_inner(model, sample, args, device, x, y, src, penalite, rng, gen)
+
+
+def _predict_tree_inner(model, sample, args, device, x, y, src, penalite, rng, gen):
     # 1. générer les candidats (échantillonnage + beam)
     n_cand = int(getattr(args, "candidates", 48))
     candidats_bruts = []
@@ -2154,9 +2166,10 @@ def load_or_build(args, device):
             print(f"checkpoint chargé avec compatibilité : manquants={len(missing)}, inattendus={len(unexpected)}")
         try:
             if os.environ.get("RS_COMPILE", "1") == "1":
-                model = torch.compile(model, mode="reduce-overhead" if device.type == "cpu" else "default")
+                model = torch.compile(model, mode="reduce-overhead")
         except Exception:
             pass
+        model.eval()
         print(f"checkpoint chargé : {args.ckpt} (étape {ckpt.get('step', '?')})")
         return model, int(ckpt.get("step", 0))
     hp = {"d_model": args.d_model,
@@ -2170,9 +2183,10 @@ def load_or_build(args, device):
     model = SymbolicRegressor(**hp).to(device)
     try:
         if os.environ.get("RS_COMPILE", "1") == "1" and not args.eval_only:
-            model = torch.compile(model, mode="reduce-overhead" if device.type == "cpu" else "default")
+            model = torch.compile(model, mode="reduce-overhead")
     except Exception:
         pass
+    model.eval()
     return model, 0
 
 
