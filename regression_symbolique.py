@@ -2028,13 +2028,15 @@ def train(model, args, device, start_step=0):
 
     num_workers = int(getattr(args, "num_workers", 0) or 0)
     executor = None
-    if num_workers > 0:
+    if num_workers > 0 and device.type != "cuda":
         try:
             ctx = mp.get_context("fork")
             executor = ProcessPoolExecutor(max_workers=num_workers, mp_context=ctx)
             print(f"génération parallèle: {num_workers} workers")
         except Exception:
             executor = None
+    elif num_workers > 0 and device.type == "cuda":
+        print("génération parallèle désactivée sur CUDA (stabilité)")
 
     print(f"entraînement : {args.steps - start_step} étapes, "
           f"lot={args.batch_size}, d={args.d_model}, "

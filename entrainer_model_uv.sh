@@ -41,6 +41,8 @@ EVAL_EVERY=${EVAL_EVERY:-250}
 EVAL_SAMPLES=${EVAL_SAMPLES:-100}
 NUM_WORKERS=${NUM_WORKERS:-0}
 CKPT_NAME=${CKPT_NAME:-"modele_regression.pt"}
+RS_NO_COMPILE=${RS_NO_COMPILE:-1}
+export RS_NO_COMPILE
 
 # Générer nom auto si non spécifié
 if [ -z "$CKPT_NAME" ]; then
