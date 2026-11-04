@@ -196,6 +196,16 @@ def main():
     p.add_argument("--output", default=None)
     args = p.parse_args()
 
+    try:
+        if torch.cuda.is_available() and args.device != "cpu":
+            torch.backends.cudnn.benchmark = True
+            try:
+                torch.set_float32_matmul_precision('high')
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     print("=" * 80)
     print("COMPARAISON SUR FONCTIONS IDENTIQUES")
     print("=" * 80)

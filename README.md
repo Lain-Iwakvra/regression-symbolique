@@ -13,23 +13,27 @@ Le modèle encode un nuage `(x, y)` et décode l'expression sous forme d'arbre s
 - **Import CSV** - Charger des points depuis un fichier CSV
 - **Ligne de commande** - `--predict`, `--predict-file`, `--verifier`
 - **Polyvalent** - Fonctionne avec différents nombres de points (4-256) et domaines
-- **Affinage automatique** - Beam search, dédoublonnage canonique, optimisation des constantes
+- **Affinage automatique** - Beam search, dédoublonnage canonique/sémantique, optimisation des constantes (Levenberg–Marquardt)
+- **Simplification symbolique** - Simplification via SymPy pour des formules plus lisibles
+- **Benchmark figé** - Évaluation reproductible sur un jeu de fonctions identiques
 
 ## Installation
-
-```bash
-git clone https://github.com/Lain-Iwakvra/regression-symbolique.git
-cd regression-symbolique
-```
 
 ### Avec uv (recommandé)
 
 ```bash
+git clone https://github.com/Lain-Iwakvra/regression-symbolique.git
+cd regression-symbolique
+
 curl -LsSf https://astral.sh/uv/install.sh | sh
 uv venv --python python3.12
 source .venv/bin/activate
-uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121  # GPU
-# ou: uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu  # CPU
+
+# GPU (CUDA 12.1)
+uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+# ou CPU
+# uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+
 uv pip install numpy scipy sympy matplotlib
 ```
 
@@ -58,13 +62,13 @@ python interface.py
 ### Ligne de commande
 
 ```bash
-# Depuis des points
+# Depuis des points inline
 python regression_symbolique.py --predict "0,0;1,1;2,4;3,9"
 
-# Depuis un fichier CSV/TXT
+# Depuis un fichier CSV/TXT (séparateurs ; , tab ou espace)
 python regression_symbolique.py --predict-file points.csv
 
-# Vérifier une formule
+# Vérifier une formule contre un nuage généré
 python interface.py --verifier "2.5*x - 1" --points 64
 ```
 
@@ -99,11 +103,20 @@ python comparer_modeles.py modele_regression.pt autre_modele.pt --samples 200 --
 
 | Fichier | Description |
 |---|---|
-| `regression_symbolique.py` | Cœur du modèle, entraînement et inférence |
+| `regression_symbolique.py` | Cœur du modèle, entraînement, inférence et prédiction |
 | `interface.py` | Interface graphique Tkinter + Matplotlib |
-| `entrainer_model_uv.sh` | Script d'entraînement configurable (GPU/CPU) |
 | `comparer_modeles.py` | Comparaison de modèles sur des fonctions identiques |
+| `entrainer_model_uv.sh` | Script d'entraînement configurable (GPU/CPU) |
 | `modele_regression.pt` | Modèle pré-entraîné |
+
+## Optimisations
+
+Le code intègre plusieurs optimisations pour de meilleures performances :
+- Masquage grammatical vectorisé/caché
+- Décodage optimisé avec caches de masques
+- `torch.compile`, AMP, `cudnn.benchmark`
+- Génération parallèle des batches (sur CPU)
+- Affinage efficace des constantes (Levenberg–Marquardt)
 
 ## Licence
 

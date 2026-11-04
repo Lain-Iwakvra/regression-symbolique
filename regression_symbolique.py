@@ -69,6 +69,8 @@ import copy
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 
+sys.setrecursionlimit(10_000)
+
 import numpy as np
 
 try:
@@ -950,6 +952,7 @@ class SymbolicRegressor(nn.Module):
                             ff=ff, dropout=dropout, n_points=n_points,
                             max_len=max_len)
         self.register_buffer("arity", ARITY_VEC.clone(), persistent=False)
+        self._causal_cache = {}
 
         # --- encodeur (nuage de points triés) ---
         self.in_proj = nn.Sequential(
@@ -995,10 +998,14 @@ class SymbolicRegressor(nn.Module):
         L = tgt_ids.size(1)
         h = self.tok_emb(tgt_ids) * math.sqrt(self.hparams["d_model"])
         h = h + _sinusoidal_pos(self.hparams["d_model"], L, tgt_ids.device)
-        causal = torch.zeros(L, L, device=tgt_ids.device)
-        causal.masked_fill_(
-            torch.triu(torch.ones(L, L, dtype=torch.bool, device=tgt_ids.device), 1),
-            float("-inf"))
+        key = (L, tgt_ids.device)
+        if key not in self._causal_cache:
+            causal = torch.zeros(L, L, device=tgt_ids.device)
+            causal.masked_fill_(
+                torch.triu(torch.ones(L, L, dtype=torch.bool, device=tgt_ids.device), 1),
+                float("-inf"))
+            self._causal_cache[key] = causal
+        causal = self._causal_cache[key]
         return self.decoder(h, memory, tgt_mask=causal)
 
     def forward(self, src, tgt_ids):
@@ -1016,18 +1023,30 @@ class SymbolicRegressor(nn.Module):
 # 4. MASQUAGE GRAMMATICAL
 # =========================================================================
 
+# Pré-cache des masques de base
+_ALLOWED_BASE_CACHE = {}
+
+def _get_allowed_base(device):
+    key = (device, V)
+    if key not in _ALLOWED_BASE_CACHE:
+        base = torch.ones(V, dtype=torch.bool, device=device)
+        base[PAD_ID] = False
+        base[BOS_ID] = False
+        base[EOS_ID] = False
+        _ALLOWED_BASE_CACHE[key] = base
+    return _ALLOWED_BASE_CACHE[key]
+
+
 def allowed_rows(slots, device):
     """(B,) 'sous-expressions restantes à produire' -> (B, V) bool.
-
+ 
     slots > 0 : tous les jetons sauf pad/bos/eos.
     slots = 0 : seulement eos/pad (l'expression est complète)."""
-    base = torch.ones(V, dtype=torch.bool, device=device)
-    base[PAD_ID] = False
-    base[BOS_ID] = False
-    base[EOS_ID] = False
-    rows = base.expand(slots.size(0), -1).clone()
+    B = slots.size(0)
+    base = _get_allowed_base(device)
+    rows = base.unsqueeze(0).expand(B, V).clone()
     zero = slots == 0
-    if bool(zero.any()):
+    if zero.any():
         rows[zero] = False
         rows[zero, EOS_ID] = True
         rows[zero, PAD_ID] = True
@@ -1042,12 +1061,21 @@ def target_valid_mask(tgt_out):
     device = tgt_out.device
     out = torch.zeros(B, L, V, dtype=torch.bool, device=device)
     slots = torch.ones(B, dtype=torch.long, device=device)
+    arity = ARITY_VEC.to(device)
+    base = _get_allowed_base(device)
     for t in range(L):
-        out[:, t] = allowed_rows(slots, device)
+        rows = base.unsqueeze(0).expand(B, V).clone()
+        zero = slots == 0
+        if zero.any():
+            rows[zero] = False
+            rows[zero, EOS_ID] = True
+            rows[zero, PAD_ID] = True
+        out[:, t] = rows
         open_ = slots > 0
-        slots = torch.where(open_,
-                            slots - 1 + ARITY_VEC.to(device)[tgt_out[:, t]],
-                            slots)
+        if open_.any():
+            slots = torch.where(open_,
+                                slots - 1 + arity[tgt_out[:, t]],
+                                slots)
     return out
 
 
@@ -1063,25 +1091,26 @@ def update_slots(slots, tok):
 @torch.no_grad()
 def _decode_from_memory(model, memory, max_len, temperature, device,
                         const_noise=0.0, rng=None, gen=None):
-    """Une passe de décodage autoregressif, contraint par la grammaire.
-
-    Si `temperature` > 0, les constantes sont perturbées (bruit gaussien) :
-    comme elles sortent d'une tête de régression déterministe, c'est le seul
-    moyen de faire varier leurs valeurs d'un candidat à l'autre — la
-    sélection par RMSE affine alors les coefficients.
-
-    `rng` (numpy) et `gen` (torch.Generator) rendent le tirage reproductible
-    pour un nuage donné."""
+    """Une passe de décodage autoregressif, contraint par la grammaire."""
     B = memory.size(0)
     ids = torch.full((B, 1), BOS_ID, dtype=torch.long, device=device)
     slots = torch.ones(B, dtype=torch.long, device=device)
     done = torch.zeros(B, dtype=torch.bool, device=device)
     out_ids: list[list[int]] = [[] for _ in range(B)]
     out_vals: list[list[float]] = [[] for _ in range(B)]
+    allowed_base = _get_allowed_base(device)
+    arity = ARITY_VEC.to(device)
 
     for _ in range(max_len):
         logits, cval = model.step(ids, memory)
-        logits = logits.masked_fill(~allowed_rows(slots, device), -1e4)
+        # mask
+        rows = allowed_base.unsqueeze(0).expand(B, V).clone()
+        zero = slots == 0
+        if zero.any():
+            rows[zero] = False
+            rows[zero, EOS_ID] = True
+            rows[zero, PAD_ID] = True
+        logits = logits.masked_fill(~rows, -1e4)
         if temperature > 0.0:
             probas = F.softmax(logits, dim=-1)
             if gen is not None:
@@ -1107,7 +1136,7 @@ def _decode_from_memory(model, memory, max_len, temperature, device,
             else:
                 out_vals[b].append(0.0)
         ids = torch.cat([ids, nxt.unsqueeze(1)], dim=1)
-        slots = update_slots(slots, nxt)
+        slots = torch.where(slots > 0, slots - 1 + arity[nxt], slots)
         done = done | (slots == 0)
         if bool(done.all()):
             break
@@ -1124,34 +1153,45 @@ def _decode_batched(model, memory, max_len, temps, const_noises, rng, gen):
     done = torch.zeros(B, dtype=torch.bool, device=device)
     out_ids = [[] for _ in range(B)]
     out_vals = [[] for _ in range(B)]
-    temps_t = torch.tensor(temps, dtype=torch.float32, device=device)
-    cn_t = torch.tensor(const_noises, dtype=torch.float32, device=device)
-    if len(temps) != B:
-        temps = list(temps) + [0.0] * (B - len(temps))
-        temps_t = torch.tensor(temps[:B], dtype=torch.float32, device=device)
-    if len(const_noises) != B:
-        cn_t = torch.tensor(list(const_noises) + [0.0] * (B - len(const_noises)), dtype=torch.float32, device=device)[:B]
+    temps_list = list(temps)
+    if len(temps_list) != B:
+        temps_list = temps_list + [0.0] * (B - len(temps_list))
+        temps_list = temps_list[:B]
+    cn_list = list(const_noises)
+    if len(cn_list) != B:
+        cn_list = cn_list + [0.0] * (B - len(cn_list))
+        cn_list = cn_list[:B]
+    temps_t = torch.tensor(temps_list, dtype=torch.float32, device=device)
+    cn_t = torch.tensor(cn_list, dtype=torch.float32, device=device)
+    allowed_base = _get_allowed_base(device)
+    arity = ARITY_VEC.to(device)
 
     for _ in range(max_len):
         logits, cval = model.step(ids, memory)
-        logits = logits.masked_fill(~allowed_rows(slots, device), -1e4)
+        rows = allowed_base.unsqueeze(0).expand(B, V).clone()
+        zero = slots == 0
+        if zero.any():
+            rows[zero] = False
+            rows[zero, EOS_ID] = True
+            rows[zero, PAD_ID] = True
+        logits = logits.masked_fill(~rows, -1e4)
         t = temps_t.clone()
         t = torch.where(done, torch.ones_like(t), t)
         probs = F.softmax(logits / t.unsqueeze(1).clamp(min=1e-4), dim=-1)
         if gen is not None:
             nxt = torch.multinomial(probs, 1, generator=gen).squeeze(1)
-        elif rng is not None and any(temps[b] > 0 for b in range(B)):
-            nxt_list = []
+        elif rng is not None and any(temps_list[b] > 0 for b in range(B)):
+            nxt_list_res = []
             for b in range(B):
                 if bool(done[b]):
-                    nxt_list.append(PAD_ID)
-                elif temps[b] <= 0:
-                    nxt_list.append(int(logits[b].argmax().item()))
+                    nxt_list_res.append(PAD_ID)
+                elif temps_list[b] <= 0:
+                    nxt_list_res.append(int(logits[b].argmax().item()))
                 else:
                     p = probs[b].detach().cpu().numpy()
                     p = p / (p.sum() + 1e-18)
-                    nxt_list.append(int(rng.choice(len(p), p=p)))
-            nxt = torch.tensor(nxt_list, dtype=torch.long, device=device)
+                    nxt_list_res.append(int(rng.choice(len(p), p=p)))
+            nxt = torch.tensor(nxt_list_res, dtype=torch.long, device=device)
         else:
             nxt = logits.argmax(dim=-1)
         nxt = torch.where(done, torch.full_like(nxt, PAD_ID), nxt)
@@ -1162,7 +1202,7 @@ def _decode_batched(model, memory, max_len, temps, const_noises, rng, gen):
             out_ids[b].append(tok)
             if tok == CONST_ID:
                 v = float(cval[b].item())
-                if temps[b] > 0.0 and cn_t[b] > 0.0:
+                if temps_list[b] > 0.0 and cn_t[b] > 0.0:
                     if rng is not None:
                         v += float(rng.normal(0.0, float(cn_t[b].item())))
                     else:
@@ -1171,7 +1211,7 @@ def _decode_batched(model, memory, max_len, temps, const_noises, rng, gen):
             else:
                 out_vals[b].append(0.0)
         ids = torch.cat([ids, nxt.unsqueeze(1)], dim=1)
-        slots = update_slots(slots, nxt)
+        slots = torch.where(slots > 0, slots - 1 + arity[nxt], slots)
         done = done | (slots == 0)
         if bool(done.all()):
             break
@@ -1415,6 +1455,43 @@ def _cle_canonique(tree, arrondi=1e-3):
     if tag in ("add", "mul"):
         enfants.sort()
     return f"{tag}({','.join(enfants)})"
+
+
+def trees_equal(t1, t2, tol=1e-6):
+    """Égalité structurelle (et numérique pour les constantes)."""
+    if t1 is None or t2 is None:
+        return t1 is t2
+    if t1[0] != t2[0]:
+        return False
+    tag = t1[0]
+    if tag == "x":
+        return True
+    if tag == "const":
+        try:
+            return abs(float(t1[1]) - float(t2[1])) <= tol
+        except Exception:
+            return t1[1] == t2[1]
+    if tag in ("add", "mul"):
+        # commutatifs
+        c1 = list(t1[1:])
+        c2 = list(t2[1:])
+        if len(c1) != len(c2):
+            return False
+        # comparer toutes les permutations possibles (petits arbres)
+        used = [False] * len(c2)
+        for a in c1:
+            ok = False
+            for j, b in enumerate(c2):
+                if not used[j] and trees_equal(a, b, tol):
+                    used[j] = True
+                    ok = True
+                    break
+            if not ok:
+                return False
+        return True
+    if len(t1) != len(t2):
+        return False
+    return all(trees_equal(t1[i], t2[i], tol) for i in range(1, len(t1)))
 
 
 def _eval_numerique(tree, x):
@@ -2007,6 +2084,25 @@ def _gen_batch_worker(args_seed, n_samples, n_points, max_depth, noise, x_range,
     return samples
 
 
+def _compute_loss(model, batch, args):
+    logits, const_pred = model(batch["src"], batch["tgt_in"])
+    valid = target_valid_mask(batch["tgt_out"])
+    masked = logits.masked_fill(~valid, -1e4)
+    loss_sym = F.cross_entropy(
+        masked.reshape(-1, V), batch["tgt_out"].reshape(-1),
+        ignore_index=PAD_ID)
+    cmask = (batch["tgt_out"] == CONST_ID).float()
+    if getattr(args, "loss_const", "mse") == "huber":
+        ecarts = (const_pred - batch["const_tgt"]).abs()
+        perte = torch.where(ecarts <= 0.5, 0.5 * ecarts ** 2,
+                            0.5 * (ecarts - 0.25))
+    else:
+        perte = (const_pred - batch["const_tgt"]) ** 2
+    loss_c = (perte * cmask).sum() / cmask.sum().clamp(min=1.0)
+    loss = loss_sym + args.w_const * loss_c
+    return loss, loss_sym, loss_c
+
+
 def train(model, args, device, start_step=0):
     model.train()
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr,
@@ -2082,59 +2178,17 @@ def train(model, args, device, start_step=0):
         if use_amp and scaler is not None:
             try:
                 with torch.amp.autocast('cuda'):
-                    logits, const_pred = model(batch["src"], batch["tgt_in"])
-                    valid = target_valid_mask(batch["tgt_out"])
-                    masked = logits.masked_fill(~valid, -1e4)
-                    loss_sym = F.cross_entropy(
-                        masked.reshape(-1, V), batch["tgt_out"].reshape(-1),
-                        ignore_index=PAD_ID)
-                    cmask = (batch["tgt_out"] == CONST_ID).float()
-                    if getattr(args, "loss_const", "mse") == "huber":
-                        ecarts = (const_pred - batch["const_tgt"]).abs()
-                        perte = torch.where(ecarts <= 0.5, 0.5 * ecarts ** 2,
-                                            0.5 * (ecarts - 0.25))
-                    else:
-                        perte = (const_pred - batch["const_tgt"]) ** 2
-                    loss_c = (perte * cmask).sum() / cmask.sum().clamp(min=1.0)
-                    loss = loss_sym + args.w_const * loss_c
+                    loss, loss_sym, loss_c = _compute_loss(model, batch, args)
             except Exception:
                 with torch.cuda.amp.autocast():
-                    logits, const_pred = model(batch["src"], batch["tgt_in"])
-                    valid = target_valid_mask(batch["tgt_out"])
-                    masked = logits.masked_fill(~valid, -1e4)
-                    loss_sym = F.cross_entropy(
-                        masked.reshape(-1, V), batch["tgt_out"].reshape(-1),
-                        ignore_index=PAD_ID)
-                    cmask = (batch["tgt_out"] == CONST_ID).float()
-                    if getattr(args, "loss_const", "mse") == "huber":
-                        ecarts = (const_pred - batch["const_tgt"]).abs()
-                        perte = torch.where(ecarts <= 0.5, 0.5 * ecarts ** 2,
-                                            0.5 * (ecarts - 0.25))
-                    else:
-                        perte = (const_pred - batch["const_tgt"]) ** 2
-                    loss_c = (perte * cmask).sum() / cmask.sum().clamp(min=1.0)
-                    loss = loss_sym + args.w_const * loss_c
+                    loss, loss_sym, loss_c = _compute_loss(model, batch, args)
             scaler.scale(loss).backward()
             scaler.unscale_(opt)
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             scaler.step(opt)
             scaler.update()
         else:
-            logits, const_pred = model(batch["src"], batch["tgt_in"])
-            valid = target_valid_mask(batch["tgt_out"])
-            masked = logits.masked_fill(~valid, -1e4)
-            loss_sym = F.cross_entropy(
-                masked.reshape(-1, V), batch["tgt_out"].reshape(-1),
-                ignore_index=PAD_ID)
-            cmask = (batch["tgt_out"] == CONST_ID).float()
-            if getattr(args, "loss_const", "mse") == "huber":
-                ecarts = (const_pred - batch["const_tgt"]).abs()
-                perte = torch.where(ecarts <= 0.5, 0.5 * ecarts ** 2,
-                                    0.5 * (ecarts - 0.25))
-            else:
-                perte = (const_pred - batch["const_tgt"]) ** 2
-            loss_c = (perte * cmask).sum() / cmask.sum().clamp(min=1.0)
-            loss = loss_sym + args.w_const * loss_c
+            loss, loss_sym, loss_c = _compute_loss(model, batch, args)
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
@@ -2399,6 +2453,15 @@ def main(argv=None):
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     random.seed(args.seed)
+    try:
+        if device.type == "cuda":
+            torch.backends.cudnn.benchmark = True
+            try:
+                torch.set_float32_matmul_precision('high')
+            except Exception:
+                pass
+    except Exception:
+        pass
 
     # ---- création d'un jeu de validation figé ----
     if args.creer_benchmark:

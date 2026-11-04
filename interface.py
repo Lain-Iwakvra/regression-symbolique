@@ -542,6 +542,15 @@ def main():
     args = p.parse_args()
     import torch
     torch.set_num_threads(min(4, torch.get_num_threads()))
+    try:
+        if torch.cuda.is_available():
+            torch.backends.cudnn.benchmark = True
+            try:
+                torch.set_float32_matmul_precision('high')
+            except Exception:
+                pass
+    except Exception:
+        pass
     if args.verifier:
         device = torch.device("cpu")
         model,hp,et = charger_modele(args.ckpt,device)
