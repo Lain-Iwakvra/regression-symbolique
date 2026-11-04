@@ -21,29 +21,29 @@ echo ""
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# Configuration par défaut (progressif)
-D_MODEL=${D_MODEL:-288}
-N_HEADS=${N_HEADS:-9}
+# Configuration par défaut (modèle actuel)
+D_MODEL=${D_MODEL:-256}
+N_HEADS=${N_HEADS:-8}
 ENC_LAYERS=${ENC_LAYERS:-4}
 DEC_LAYERS=${DEC_LAYERS:-4}
-FF=${FF:-1152}
-DROPOUT=${DROPOUT:-0.08}
-BATCH_SIZE=${BATCH_SIZE:-64}
-STEPS=${STEPS:-35000}
+FF=${FF:-1024}
+DROPOUT=${DROPOUT:-0.05}
+BATCH_SIZE=${BATCH_SIZE:-32}
+STEPS=${STEPS:-28000}
 LR=${LR:-3e-4}
-WARMUP=${WARMUP:-1500}
-MAX_DEPTH=${MAX_DEPTH:-4}
+WARMUP=${WARMUP:-1000}
+MAX_DEPTH=${MAX_DEPTH:-3}
 N_POINTS=${N_POINTS:-64}
-W_CONST=${W_CONST:-1.2}
+W_CONST=${W_CONST:-1.0}
 LOSS_CONST=${LOSS_CONST:-huber}
 CANONIQUE=${CANONIQUE:-1}
-EVAL_EVERY=${EVAL_EVERY:-1000}
+EVAL_EVERY=${EVAL_EVERY:-250}
 EVAL_SAMPLES=${EVAL_SAMPLES:-100}
-NUM_WORKERS=${NUM_WORKERS:-8}
-CKPT_NAME=${CKPT_NAME:-""}
+NUM_WORKERS=${NUM_WORKERS:-0}
+CKPT_NAME=${CKPT_NAME:-"modele_regression.pt"}
 
 # Générer nom auto si non spécifié
-if [ -z "$CKPT_NAME" ]; then
+if [ -z "$CKPT_NAME" ] || [ "$CKPT_NAME" = "modele_regression.pt" ] && [ -n "${D_MODEL_OVERRIDE+x}" ]; then
     CKPT_NAME="modele_regression_d${D_MODEL}_e${ENC_LAYERS}d${DEC_LAYERS}_ff${FF}.pt"
 fi
 
@@ -104,14 +104,14 @@ echo -e "${GREEN}[OK]${NC} Prêt"
 echo ""
 
 # Reprise auto
-RESUME=""
+RESUME_ARGS=()
 if [ -f "$CKPT_NAME" ]; then
     echo -e "${YELLOW}[INFO]${NC} Reprise depuis $CKPT_NAME (--resume)"
-    RESUME="--resume"
+    RESUME_ARGS=(--resume)
 fi
 
-CANON_FLAG=""
-[ "$CANONIQUE" = "1" ] && CANON_FLAG="--canonique"
+CANON_ARGS=()
+[ "$CANONIQUE" = "1" ] && CANON_ARGS=(--canonique)
 
 echo -e "${BLUE}==================================================${NC}"
 echo -e "${GREEN}[LANCEMENT]${NC}"
@@ -129,7 +129,7 @@ python regression_symbolique.py \
   --batch-size $BATCH_SIZE \
   --max-depth $MAX_DEPTH \
   --n-points $N_POINTS \
-  $CANON_FLAG \
+  "${CANON_ARGS[@]}" \
   --loss-const $LOSS_CONST \
   --w-const $W_CONST \
   --lr $LR \
@@ -138,8 +138,8 @@ python regression_symbolique.py \
   --eval-samples $EVAL_SAMPLES \
   --examples 10 \
   --num-workers $NUM_WORKERS \
-  --ckpt $CKPT_NAME \
-  $RESUME
+  --ckpt "$CKPT_NAME" \
+  "${RESUME_ARGS[@]}"
 
 echo ""
 echo -e "${GREEN}[TERMINÉ]${NC} Checkpoint: $CKPT_NAME"
