@@ -7,9 +7,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import sys
 import time
-from typing import List, Dict, Any
+from typing import List
 
 import numpy as np
 import torch
@@ -17,32 +18,18 @@ import torch
 import regression_symbolique as rs
 
 
-class ProgressBar:
-    def __init__(self, total: int, prefix: str = "", width: int = 40):
-        self.total = total
-        self.prefix = prefix
-        self.width = width
-        self.start = time.time()
-        self.current = 0
-
-    def update(self, n: int = 1):
-        self.current += n
-        if self.total == 0:
-            return
-        pct = self.current / self.total
-        filled = int(self.width * pct)
-        bar = "█" * filled + "░" * (self.width - filled)
-        elapsed = time.time() - self.start
-        if self.current > 0:
-            eta = elapsed / self.current * (self.total - self.current)
-            eta_str = f"ETA {eta:4.0f}s"
-        else:
-            eta_str = "ETA --s"
-        sys.stdout.write(f"\r{self.prefix} [{bar}] {self.current}/{self.total} ({pct*100:5.1f}%) {eta_str}")
-        sys.stdout.flush()
-        if self.current >= self.total:
-            sys.stdout.write("\n")
-            sys.stdout.flush()
+class Options:
+    def __init__(self, hparams, candidats=48, affinage=8):
+        self.n_points = int(hparams.get("n_points", 64))
+        self.max_len = int(hparams.get("max_len", 64))
+        self.candidates = int(candidats)
+        self.temperature = 1.0
+        self.const_noise = 0.15
+        self.refine = int(affinage)
+        self.refine_steps = 300
+        self.penalite = 0.002
+        self.seed = 0
+        self.x_range = 4.0
 
 
 def load_model(ckpt_path: str, device: torch.device):
@@ -58,12 +45,96 @@ def load_model(ckpt_path: str, device: torch.device):
     return model, hp, ckpt
 
 
+def generate_fixed_samples(n_samples: int, seed: int, max_depth: int = 4):
+    rng = random.Random(seed)
+    samples = []
+    for i in range(n_samples):
+        try:
+            s = rs.generate_sample(rng, 64, max_depth, 0.0, 4.0, 64, canonique=True, n_points_var=False, domaine_var=False)
+            samples.append(s)
+        except Exception:
+            continue
+    return samples
+
+
+def eval_on_samples(model, samples, opt, device):
+    n = 0
+    found = 0
+    exact = 0
+    total_rmse_rel = 0.0
+    depths = {}
+    total = len(samples)
+    t0 = time.time()
+    for idx, s in enumerate(samples):
+        tree_true = s.get("tree")
+        if tree_true is None:
+            continue
+        depth = rs.tree_depth(tree_true)
+        depths.setdefault(depth, [0, 0])
+        depths[depth][0] += 1
+        n += 1
+        try:
+            ids, vals, tree_pred = rs.predict_tree(model, s, opt, device)
+            if tree_pred is None:
+                # update bar
+                pct = (idx+1)/total
+                bar = "█"*int(40*pct) + "░"*(40-int(40*pct))
+                sys.stdout.write(f"\r    [{bar}] {idx+1}/{total}")
+                sys.stdout.flush()
+                continue
+            try:
+                tree_pred = rs.simplify_formula(tree_pred, s["x"], s["y"])
+            except Exception:
+                pass
+            yp = rs.eval_tree(tree_pred, s["x"])
+            yt = rs.eval_tree(tree_true, s["x"])
+            fini = np.isfinite(yp) & np.isfinite(yt)
+            if not fini.any():
+                pct = (idx+1)/total
+                bar = "█"*int(40*pct) + "░"*(40-int(40*pct))
+                sys.stdout.write(f"\r    [{bar}] {idx+1}/{total}")
+                sys.stdout.flush()
+                continue
+            rmse = np.sqrt(np.mean((yp[fini] - yt[fini]) ** 2))
+            echelle = np.std(yt[fini]) if np.std(yt[fini]) > 1e-12 else max(np.max(np.abs(yt[fini])), 1e-12)
+            rel = rmse / echelle
+            if rel < 0.05:
+                found += 1
+                depths[depth][1] += 1
+            try:
+                if rs.trees_equal(tree_pred, tree_true):
+                    exact += 1
+            except Exception:
+                pass
+            total_rmse_rel += rel
+        except Exception:
+            pass
+        pct = (idx+1)/total
+        bar = "█"*int(40*pct) + "░"*(40-int(40*pct))
+        sys.stdout.write(f"\r    [{bar}] {idx+1}/{total}")
+        sys.stdout.flush()
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+    return {
+        "n": n,
+        "found": found / max(n, 1),
+        "exact": exact / max(n, 1),
+        "mean_rel": total_rmse_rel / max(n, 1),
+        "depths": depths
+    }
+
+
 def compare_models(ckpts: List[str], args):
     device = torch.device("cuda" if torch.cuda.is_available() and args.device != "cpu" else "cpu")
     if device.type == "cuda":
         print(f"GPU: {torch.cuda.get_device_name(0)}")
     else:
         print("CPU")
+    print()
+
+    print(f"Génération de {args.samples} fonctions identiques pour tous les modèles...")
+    samples = generate_fixed_samples(args.samples, args.seed, max_depth=args.max_depth)
+    print(f"  {len(samples)} fonctions générées avec seed={args.seed}")
     print()
 
     results = []
@@ -73,47 +144,27 @@ def compare_models(ckpts: List[str], args):
             print(f"⚠ {ckpt_path} introuvable, ignoré")
             continue
 
-        print(f"[{idx+1}/{len(ckpts)}] Chargement {ckpt_path}")
+        print(f"[{idx+1}/{len(ckpts)}] {ckpt_path}")
         model, hp, ckpt = load_model(ckpt_path, device)
         step = ckpt.get("step", "?")
         params = sum(p.numel() for p in model.parameters()) / 1e6
 
-        opt = rs.Options(hp, candidats=args.candidates, affinage=args.refine)
+        opt = Options(hp, candidats=args.candidates, affinage=args.refine)
         opt.temperature = args.temperature
         opt.penalite = args.penalite
         opt.seed = args.seed
+        opt.x_range = 4.0
 
         print(f"  d_model={hp['d_model']} | enc{hp['enc_layers']}/dec{hp['dec_layers']} | ff={hp.get('ff')} | heads={hp.get('nhead')} | {params:.1f}M | étape {step}")
-        print(f"  Évaluation en cours...")
+        print(f"  Test en cours sur {len(samples)} fonctions identiques...")
 
-        pb = ProgressBar(args.samples, prefix="  ")
+        t0 = time.time()
+        stats = eval_on_samples(model, samples, opt, device)
+        dt = time.time() - t0
 
-        original_print = print
+        print(f"  fonction retrouvée : {100*stats['found']:.1f}%   exactement identique : {100*stats['exact']:.1f}%   temps : {dt:.1f}s")
+        print()
 
-        def patched_print(*a, **kw):
-            s = " ".join(str(x) for x in a)
-            if s.strip().startswith("fonction retrouvée") or s.strip().startswith("exactement") or s.strip().startswith("==="):
-                return
-            original_print(*a, **kw)
-
-        # Monkey patch pour capturer le résultat
-        import builtins
-        builtins.print = patched_print
-
-        try:
-            if args.benchmark:
-                with open(args.benchmark, encoding="utf-8") as f:
-                    bench = json.load(f)
-                bench = bench[:args.samples]
-                rs.eval_benchmark(model, bench, opt, device, repetitions=args.repetitions, verbose=True)
-            else:
-                rs.evaluate(model, args, device, args.seed + idx, n_samples=args.samples,
-                            n_examples=0, verbose=True)
-        finally:
-            builtins.print = original_print
-
-        # Recharger le meilleur depuis les stats? On relance un petit parsing
-        # Plus simple: relire depuis un fichier temporaire
         results.append({
             "fichier": os.path.basename(ckpt_path),
             "chemin": ckpt_path,
@@ -123,64 +174,59 @@ def compare_models(ckpts: List[str], args):
             "tetes": hp.get("nhead"),
             "params_M": round(params, 1),
             "etape": step,
+            "trouve": round(100*stats['found'], 1),
+            "exact": round(100*stats['exact'], 1),
+            "temps_s": round(dt, 1)
         })
-        pb.update(args.samples)
-        print()
 
     return results
 
 
 def main():
-    p = argparse.ArgumentParser(description="Comparer plusieurs modèles de régression symbolique")
+    p = argparse.ArgumentParser(description="Comparer plusieurs modèles sur des fonctions identiques")
     p.add_argument("checkpoints", nargs="+", help="Fichiers .pt à comparer")
     p.add_argument("--samples", type=int, default=200, help="Nombre de fonctions à tester")
+    p.add_argument("--max-depth", type=int, default=4)
     p.add_argument("--candidates", type=int, default=48)
     p.add_argument("--refine", type=int, default=8)
     p.add_argument("--temperature", type=float, default=1.0)
     p.add_argument("--penalite", type=float, default=0.002)
-    p.add_argument("--repetitions", type=int, default=1)
-    p.add_argument("--seed", type=int, default=12345)
-    p.add_argument("--benchmark", default=None, help="Fichier benchmark JSON")
+    p.add_argument("--seed", type=int, default=42)
     p.add_argument("--device", default="auto")
-    p.add_argument("--output", default=None, help="Sauvegarder en JSON/CSV")
+    p.add_argument("--output", default=None)
     args = p.parse_args()
 
-    print("=" * 60)
-    print("COMPARAISON DE MODÈLES")
-    print("=" * 60)
-    print(f"Modèles: {len(args.checkpoints)}")
-    print(f"Fonctions: {args.samples}")
-    print(f"candidates={args.candidates}, refine={args.refine}")
-    if args.benchmark:
-        print(f"Benchmark: {args.benchmark}")
-    print("=" * 60)
+    print("=" * 80)
+    print("COMPARAISON SUR FONCTIONS IDENTIQUES")
+    print("=" * 80)
+    print(f"Modèles: {len(args.checkpoints)} | Fonctions: {args.samples} | Seed: {args.seed}")
+    print(f"candidates={args.candidates}, refine={args.refine}, max_depth={args.max_depth}")
+    print("=" * 80)
     print()
 
     results = compare_models(args.checkpoints, args)
 
-    print("\n" + "=" * 90)
-    print("RÉSULTATS")
-    print("=" * 90)
-    print(f"{'Modèle':<30} {'d_model':<8} {'Couches':<10} {'ff':<6} {'Têtes':<6} {'Params(M)':<10} {'Étape':<10}")
-    print("-" * 90)
+    print("\n" + "=" * 100)
+    print("TABLEAU COMPARATIF")
+    print("=" * 100)
+    print(f"{'Modèle':<32} {'d_model':<9} {'Couches':<10} {'ff':<7} {'Têtes':<7} {'Params(M)':<11} {'Étape':<9} {'Trouvé%':<10} {'Exact%':<10} {'Temps(s)':<10}")
+    print("-" * 100)
     for r in results:
-        print(f"{r['fichier']:<30} {r['d_model']:<8} {r['couches']:<10} {r['ff']:<6} {r['tetes']:<6} {r['params_M']:<10} {r['etape']:<10}")
-    print("=" * 90)
-    print("\nRegarde les lignes 'fonction retrouvée' et 'exactement identique' dans les sorties ci-dessus pour comparer.")
-    print("Pour un test plus précis, relance avec --benchmark benchmark_valide.json")
+        print(f"{r['fichier']:<32} {r['d_model']:<9} {r['couches']:<10} {r['ff']:<7} {r['tetes']:<7} {r['params_M']:<11} {r['etape']:<9} {r['trouve']:<10} {r['exact']:<10} {r['temps_s']:<10}")
+    print("=" * 100)
 
     if args.output:
         if args.output.endswith(".json"):
             with open(args.output, "w", encoding="utf-8") as f:
-                json.dump(results, f, indent=2, ensure_ascii=False)
-            print(f"\nRésultats sauvegardés dans {args.output}")
+                json.dump({"seed": args.seed, "samples": args.samples, "results": results}, f, indent=2, ensure_ascii=False)
+            print(f"\nSauvegardé: {args.output}")
         elif args.output.endswith(".csv"):
             import csv
             with open(args.output, "w", newline="", encoding="utf-8") as f:
                 w = csv.DictWriter(f, fieldnames=results[0].keys())
                 w.writeheader()
                 w.writerows(results)
-            print(f"\nRésultats sauvegardés dans {args.output}")
+            print(f"\nSauvegardé: {args.output}")
 
 
 if __name__ == "__main__":
