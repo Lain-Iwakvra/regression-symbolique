@@ -1641,10 +1641,14 @@ def predict_tree(model, sample, args, device):
     with torch.no_grad():
         if device.type == "cuda":
             try:
-                with torch.cuda.amp.autocast():
+                with torch.amp.autocast('cuda'):
                     return _predict_tree_inner(model, sample, args, device, x, y, src, penalite, rng, gen)
             except Exception:
-                return _predict_tree_inner(model, sample, args, device, x, y, src, penalite, rng, gen)
+                try:
+                    with torch.cuda.amp.autocast():
+                        return _predict_tree_inner(model, sample, args, device, x, y, src, penalite, rng, gen)
+                except Exception:
+                    return _predict_tree_inner(model, sample, args, device, x, y, src, penalite, rng, gen)
         else:
             return _predict_tree_inner(model, sample, args, device, x, y, src, penalite, rng, gen)
 
@@ -2017,7 +2021,10 @@ def train(model, args, device, start_step=0):
     window = 0.0
 
     use_amp = device.type == "cuda"
-    scaler = torch.cuda.amp.GradScaler() if use_amp else None
+    try:
+        scaler = torch.amp.GradScaler('cuda') if use_amp else None
+    except Exception:
+        scaler = torch.cuda.amp.GradScaler() if use_amp else None
 
     num_workers = int(getattr(args, "num_workers", 0) or 0)
     executor = None
@@ -2071,8 +2078,12 @@ def train(model, args, device, start_step=0):
 
         opt.zero_grad(set_to_none=True)
         if use_amp:
-            with torch.cuda.amp.autocast():
-                logits, const_pred = model(batch["src"], batch["tgt_in"])
+            try:
+                with torch.amp.autocast('cuda'):
+                    logits, const_pred = model(batch["src"], batch["tgt_in"])
+            except Exception:
+                with torch.cuda.amp.autocast():
+                    logits, const_pred = model(batch["src"], batch["tgt_in"])
                 valid = target_valid_mask(batch["tgt_out"])
                 masked = logits.masked_fill(~valid, -1e4)
                 loss_sym = F.cross_entropy(
@@ -2165,7 +2176,7 @@ def load_or_build(args, device):
         if missing or unexpected:
             print(f"checkpoint chargé avec compatibilité : manquants={len(missing)}, inattendus={len(unexpected)}")
         try:
-            if os.environ.get("RS_COMPILE", "1") == "1":
+            if os.environ.get("RS_COMPILE", "1") == "1" and not os.environ.get("RS_NO_COMPILE", "0") == "1":
                 model = torch.compile(model, mode="reduce-overhead")
         except Exception:
             pass
@@ -2182,7 +2193,7 @@ def load_or_build(args, device):
           "max_len": args.max_len}
     model = SymbolicRegressor(**hp).to(device)
     try:
-        if os.environ.get("RS_COMPILE", "1") == "1" and not args.eval_only:
+        if os.environ.get("RS_COMPILE", "1") == "1" and not args.eval_only and not os.environ.get("RS_NO_COMPILE", "0") == "1":
             model = torch.compile(model, mode="reduce-overhead")
     except Exception:
         pass
