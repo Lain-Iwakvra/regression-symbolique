@@ -43,7 +43,7 @@ NUM_WORKERS=${NUM_WORKERS:-0}
 CKPT_NAME=${CKPT_NAME:-"modele_regression.pt"}
 
 # Générer nom auto si non spécifié
-if [ -z "$CKPT_NAME" ] || [ "$CKPT_NAME" = "modele_regression.pt" ] && [ -n "${D_MODEL_OVERRIDE+x}" ]; then
+if [ -z "$CKPT_NAME" ]; then
     CKPT_NAME="modele_regression_d${D_MODEL}_e${ENC_LAYERS}d${DEC_LAYERS}_ff${FF}.pt"
 fi
 
