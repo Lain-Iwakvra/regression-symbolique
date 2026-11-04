@@ -1254,8 +1254,11 @@ def decode_beam(model, src, max_len, beam_width=6):
     device = src.device
     ids = torch.full((B, 1), BOS_ID, dtype=torch.long, device=device)
     slots = torch.ones(B, dtype=torch.long, device=device)
-    beams = [(ids.clone(), slots.clone(), 0.0, [[]], [[0.0]])]
+    # beams: (ids_tensor, slots_tensor, score, seq_ids_list, seq_vals_list)
+    beams = [(ids.clone(), slots.clone(), 0.0, [[BOS_ID]], [[0.0]])]
     finished = []
+    allowed_base = _get_allowed_base(device)
+    arity = ARITY_VEC.to(device)
 
     for _ in range(max_len):
         if not beams:
@@ -1266,7 +1269,16 @@ def decode_beam(model, src, max_len, beam_width=6):
                 finished.append((b_ids, score, out_ids, out_vals))
                 continue
             logits, cval = model.step(b_ids, memory)
-            logits = logits.masked_fill(~allowed_rows(b_slots, device), -1e4)
+            rows = allowed_base.unsqueeze(0).expand(1, V)
+            if b_slots[0].item() == 0:
+                rows[0] = False
+                rows[0, EOS_ID] = True
+                rows[0, PAD_ID] = True
+            else:
+                rows[0, PAD_ID] = False
+                rows[0, BOS_ID] = False
+                rows[0, EOS_ID] = False
+            logits = logits.masked_fill(~rows, -1e4)
             logp = F.log_softmax(logits, dim=-1)
             topk = torch.topk(logp, min(beam_width * 2, V))
             for k in range(topk.indices.size(1)):
@@ -1275,12 +1287,19 @@ def decode_beam(model, src, max_len, beam_width=6):
                     continue
                 lp = float(topk.values[0, k])
                 new_ids = torch.cat([b_ids, torch.tensor([[tok]], device=device)], dim=1)
-                new_slots = update_slots(b_slots.clone(), torch.tensor([tok], device=device))
-                new_out_ids = [list(x) + [tok] for x in out_ids]
+                new_slots = torch.where(b_slots > 0, b_slots - 1 + arity[torch.tensor([tok], device=device)], b_slots)
+                # copy histories efficiently
+                new_out_ids = []
+                for x in out_ids:
+                    new_out_ids.append(x + [tok])
                 if tok == CONST_ID:
-                    new_out_vals = [list(x) + [float(cval[0])] for x in out_vals]
+                    new_out_vals = []
+                    for x in out_vals:
+                        new_out_vals.append(x + [float(cval[0].item())])
                 else:
-                    new_out_vals = [list(x) + [0.0] for x in out_vals]
+                    new_out_vals = []
+                    for x in out_vals:
+                        new_out_vals.append(x + [0.0])
                 all_cands.append((new_ids, new_slots, score + lp, new_out_ids, new_out_vals))
         if not all_cands:
             break
@@ -1291,14 +1310,20 @@ def decode_beam(model, src, max_len, beam_width=6):
     out = []
     seen = set()
     for _, score, out_ids, out_vals in finished:
-        for ids, vals in zip(out_ids, out_vals):
-            if not ids:
+        for ids_seq, vals_seq in zip(out_ids, out_vals):
+            if not ids_seq:
                 continue
-            key = tuple(ids)
+            # skip BOS if present at start in our format? we started with BOS in history
+            seq_clean = ids_seq
+            if seq_clean and seq_clean[0] == BOS_ID:
+                seq_clean = seq_clean[1:]
+            if not seq_clean:
+                continue
+            key = tuple(seq_clean)
             if key in seen:
                 continue
             seen.add(key)
-            out.append((ids, vals))
+            out.append((seq_clean, vals_seq[1:] if len(vals_seq) > len(seq_clean) else vals_seq))
     return out
 
 
