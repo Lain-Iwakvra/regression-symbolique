@@ -536,7 +536,7 @@ def charger_modele(chemin, device):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--ckpt", default="modele_regression.pt")
+    p.add_argument("--ckpt", default="modele_regression_256.pt")
     p.add_argument("--verifier", metavar="FONCTION")
     p.add_argument("--points", type=int, default=64)
     args = p.parse_args()

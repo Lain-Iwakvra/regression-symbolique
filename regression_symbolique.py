@@ -2128,7 +2128,7 @@ def _compute_loss(model, batch, args):
     return loss, loss_sym, loss_c
 
 
-def train(model, args, device, start_step=0):
+def train(model, args, device, start_step=0, best=None):
     model.train()
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr,
                             weight_decay=0.01, betas=(0.9, 0.98))
@@ -2137,7 +2137,11 @@ def train(model, args, device, start_step=0):
         sched.step()
 
     rng = random.Random(args.seed + start_step)
-    best = {"found": -1.0}
+    if best is None or not isinstance(best, dict):
+        best = {"found": -1.0}
+    else:
+        best = dict(best)
+        best.setdefault("found", -1.0)
     t0 = time.time()
     window = 0.0
 
@@ -2165,6 +2169,7 @@ def train(model, args, device, start_step=0):
           f"curriculum={'non' if args.no_curriculum else 'oui'}, "
           f"appareil={device}, amp={'oui' if use_amp else 'non'}")
 
+    skip_first_save_on_resume = (start_step > 0)
     for step in range(start_step + 1, args.steps + 1):
         samples = []
         if executor is not None and args.batch_size > 1:
@@ -2235,7 +2240,14 @@ def train(model, args, device, start_step=0):
                              n_samples=args.eval_samples,
                              n_examples=0, verbose=True,
                              title=f"contrôle à l'étape {step}")
-            if stats["found"] >= best["found"]:
+            improved = stats["found"] > best.get("found", -1.0)
+            if skip_first_save_on_resume:
+                skip_first_save_on_resume = False
+                if improved:
+                    # allow saving if actually better, but user asked to avoid auto save at beginning; be conservative
+                    improved = False
+                    print("   → première évaluation après reprise : checkpoint non sauvegardé automatiquement")
+            if improved:
                 best = dict(stats)
                 best["etape"] = step
                 save_checkpoint(model, args, step, best)
@@ -2243,6 +2255,47 @@ def train(model, args, device, start_step=0):
             model.train()
 
     return best
+
+
+def _auto_ckpt_name(hp, n_params=None):
+    d = hp.get("d_model")
+    e = hp.get("enc_layers")
+    de = hp.get("dec_layers")
+    ff = hp.get("ff")
+    if n_params is not None:
+        pm = f"{n_params/1e6:.1f}M"
+        return f"modele_d{d}_e{e}d{de}_ff{ff}_{pm}.pt"
+    return f"modele_d{d}_e{e}d{de}_ff{ff}.pt"
+
+
+def _hp_from_args(args):
+    return {
+        "d_model": args.d_model,
+        "nhead": args.n_heads,
+        "enc_layers": args.enc_layers,
+        "dec_layers": args.dec_layers,
+        "ff": args.ff,
+        "dropout": args.dropout,
+        "n_points": args.n_points,
+        "max_len": args.max_len,
+    }
+
+
+def _check_resume_config(args, hp_ckpt):
+    want = _hp_from_args(args)
+    keys = ["d_model", "nhead", "enc_layers", "dec_layers", "ff", "dropout", "n_points", "max_len"]
+    diffs = []
+    for k in keys:
+        a = want.get(k)
+        b = hp_ckpt.get(k)
+        if b is None:
+            continue
+        if a != b:
+            diffs.append(f"  - {k}: script={a} vs checkpoint={b}")
+    if diffs:
+        msg = "Configuration incompatible avec le checkpoint (reprise refusée):\n" + "\n".join(diffs)
+        msg += "\nCorrigez les arguments, utilisez un autre --ckpt, ou lancez sans --resume."
+        raise SystemExit(msg)
 
 
 def save_checkpoint(model, args, step, best=None):
@@ -2257,11 +2310,18 @@ def save_checkpoint(model, args, step, best=None):
 
 def load_or_build(args, device):
     """Charge le checkpoint si présent/demandé, sinon crée un modèle neuf."""
-    if os.path.exists(args.ckpt) and (args.resume or args.eval_only):
+    if args.resume and not args.eval_only:
+        if not args.ckpt:
+            raise SystemExit("--resume nécessite --ckpt (ou un checkpoint existant)")
+        if not os.path.exists(args.ckpt):
+            raise SystemExit(f"checkpoint introuvable pour reprise : {args.ckpt}")
+    if args.ckpt and os.path.exists(args.ckpt) and (args.resume or args.eval_only):
         ckpt = torch.load(args.ckpt, map_location=device, weights_only=False)
         hp = dict(ckpt["hparams"])
         hp.setdefault("n_points", args.n_points)
         hp.setdefault("max_len", args.max_len)
+        if args.resume and not args.eval_only:
+            _check_resume_config(args, hp)
         model = SymbolicRegressor(**hp).to(device)
         sd = ckpt["model"]
         # compat ancien format (enc_pos/dec_pos)
@@ -2276,8 +2336,11 @@ def load_or_build(args, device):
         except Exception:
             pass
         model.eval()
+        best = ckpt.get("best")
+        if not isinstance(best, dict):
+            best = {"found": -1.0}
         print(f"checkpoint chargé : {args.ckpt} (étape {ckpt.get('step', '?')})")
-        return model, int(ckpt.get("step", 0))
+        return model, int(ckpt.get("step", 0)), best
     hp = {"d_model": args.d_model,
           "nhead": args.n_heads,
           "enc_layers": args.enc_layers,
@@ -2293,7 +2356,12 @@ def load_or_build(args, device):
     except Exception:
         pass
     model.eval()
-    return model, 0
+    # auto ckpt name if not set
+    if not args.ckpt:
+        n_params = sum(p.numel() for p in model.parameters())
+        args.ckpt = _auto_ckpt_name(hp, n_params)
+        print(f"checkpoint auto: {args.ckpt}")
+    return model, 0, {"found": -1.0}
 
 
 # =========================================================================
@@ -2453,8 +2521,8 @@ def parse_args(argv=None):
                    help="nombre de tirages d'inférence par fonction du benchmark")
     # divers
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--ckpt", default="modele_regression.pt",
-                   help="fichier de checkpoint")
+    p.add_argument("--ckpt", default=None,
+                   help="fichier de checkpoint (auto-généré depuis la config si absent)")
     p.add_argument("--resume", action="store_true", help="reprendre le checkpoint")
     p.add_argument("--eval-only", action="store_true",
                    help="ne pas entraîner, juste évaluer")
@@ -2501,11 +2569,17 @@ def main(argv=None):
 
     # ---- mode prédiction ----
     if args.predict or args.predict_file:
-        if not os.path.exists(args.ckpt):
+        if not args.ckpt:
+            # essayer les modèles renommés connus
+            for cand in ("modele_regression_256.pt", "modele_regression.pt"):
+                if os.path.exists(cand):
+                    args.ckpt = cand
+                    break
+        if not args.ckpt or not os.path.exists(args.ckpt):
             sys.exit(f"checkpoint introuvable : {args.ckpt} "
                      f"(entraînez d'abord le modèle).")
         args.eval_only = True
-        model, _ = load_or_build(args, device)
+        model, _, _ = load_or_build(args, device)
         if args.predict:
             xs, ys = parse_inline_points(args.predict)
             predict_from_points(model, xs, ys, args, device, "(inline)")
@@ -2515,7 +2589,7 @@ def main(argv=None):
         return
 
     # ---- entraînement / évaluation ----
-    model, start_step = load_or_build(args, device)
+    model, start_step, best_loaded = load_or_build(args, device)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"modèle : {n_params/1e6:.2f} M paramètres, vocabulaire "
           f"{V} jetons, appareil = {device}")
@@ -2536,12 +2610,12 @@ def main(argv=None):
                   f"--steps {args.steps} : rien à faire "
                   f"(augmentez --steps ou ajoutez --eval-only).")
         else:
-            best = train(model, args, device, start_step)
+            best = train(model, args, device, start_step, best=best_loaded)
             if best.get("etape"):
                 print(f"meilleur checkpoint conservé (étape {best['etape']}) "
                       f"dans {args.ckpt}")
             else:                          # aucune évaluation : on sauvegarde
-                save_checkpoint(model, args, args.steps)
+                save_checkpoint(model, args, args.steps, best=best)
                 print(f"modèle enregistré dans {args.ckpt}")
 
     evaluate(model, args, device, args.seed + 10_000,

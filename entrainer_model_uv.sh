@@ -40,13 +40,14 @@ CANONIQUE=${CANONIQUE:-1}
 EVAL_EVERY=${EVAL_EVERY:-1000}
 EVAL_SAMPLES=${EVAL_SAMPLES:-100}
 NUM_WORKERS=${NUM_WORKERS:-0}
-CKPT_NAME=${CKPT_NAME:-"modele_regression.pt"}
+CKPT_NAME_EXPLICIT=${CKPT_NAME+x}
+CKPT_NAME=${CKPT_NAME:-""}
 RS_NO_COMPILE=${RS_NO_COMPILE:-1}
 export RS_NO_COMPILE
 
-# Générer nom auto si non spécifié
+# Générer nom auto si non spécifié (inclut la taille via dimensions)
 if [ -z "$CKPT_NAME" ]; then
-    CKPT_NAME="modele_regression_d${D_MODEL}_e${ENC_LAYERS}d${DEC_LAYERS}_ff${FF}.pt"
+    CKPT_NAME="modele_d${D_MODEL}_e${ENC_LAYERS}d${DEC_LAYERS}_ff${FF}.pt"
 fi
 
 # Affichage config

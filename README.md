@@ -78,7 +78,9 @@ python interface.py --verifier "2.5*x - 1" --points 64
 ./entrainer_model_uv.sh
 ```
 
-Le script est configurable via des variables d'environnement. Voir le script pour plus de détails.
+Le script est configurable via des variables d'environnement. Par défaut, le checkpoint est nommé automatiquement selon la taille du modèle (ex: `modele_d256_e4d4_ff1024.pt`).
+- `--resume` recharge le meilleur état connu et refuse la reprise si la config du checkpoint ne correspond pas aux arguments.
+- Au début d'un réentraînement, le premier checkpoint n'est pas sauvegardé automatiquement (pour éviter d'écraser un meilleur état).
 
 ### Comparer des modèles
 
@@ -86,18 +88,14 @@ Le script est configurable via des variables d'environnement. Voir le script pou
 python comparer_modeles.py modele_regression.pt autre_modele.pt --samples 200 --seed 1234 --candidates 48 --refine 8
 ```
 
-## Modèle
+## Modèles fournis
 
-| Paramètre | Valeur |
-|---|---|
-| Architecture | Transformer encodeur-décodeur |
-| `d_model` | 256 |
-| Couches encodeur / décodeur | 4 / 4 |
-| Têtes d'attention | 8 |
-| Dimension FFN | 1024 |
-| Paramètres | ~7.4M |
-| Points d'entrée | 4-256 |
-| Longueur max formule | 64 tokens |
+| Fichier | d_model | Couches | ff | Têtes | Params | Remarques |
+|---|---:|---:|---:|---:|---:|---|
+| `modele_regression_256.pt` | 256 | 4/4 | 1024 | 8 | ~7.4M | Léger, bon compromis vitesse/précision |
+| `modele_regression_320.pt` | 320 | 4/4 | 1280 | 10 | ~11.6M | Plus grand, légèrement meilleur sur benchmarks |
+
+Capacités communes : 4-256 points d'entrée, longueur max formule 64 tokens.
 
 ## Fichiers
 
@@ -107,7 +105,8 @@ python comparer_modeles.py modele_regression.pt autre_modele.pt --samples 200 --
 | `interface.py` | Interface graphique Tkinter + Matplotlib |
 | `comparer_modeles.py` | Comparaison de modèles sur des fonctions identiques |
 | `entrainer_model_uv.sh` | Script d'entraînement configurable (GPU/CPU) |
-| `modele_regression.pt` | Modèle pré-entraîné |
+| `modele_regression_256.pt` | Modèle pré-entraîné (léger) |
+| `modele_regression_320.pt` | Modèle pré-entraîné (plus grand) |
 
 ## Optimisations
 
